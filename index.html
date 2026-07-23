@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="style.css" />
   
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Hugging Face Transformers.js for Offline AI -->
+  <script type="module" src="https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
 </head>
@@ -92,6 +94,6 @@
 
   <div id="map"></div>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

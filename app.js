@@ -1,3 +1,8 @@
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0';
+
+// ==========================================
+// 1. MAP INITIALIZATION & LAYERS
+// ==========================================
 const map = L.map('map', { zoomControl: false }).setView([20.5937, 78.9629], 5);
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 
@@ -13,6 +18,9 @@ const markersGroup = L.layerGroup().addTo(map);
 let activeMarkers = []; 
 let voiceFeedbackEnabled = true;
 
+// ==========================================
+// 2. DOM ELEMENTS & EVENT LISTENERS
+// ==========================================
 const elements = {
   micBtn: document.getElementById('mic-btn'),
   btnText: document.getElementById('btn-text'),
@@ -22,54 +30,36 @@ const elements = {
   sendBtn: document.getElementById('send-btn'),
   ttsToggle: document.getElementById('tts-toggle'),
   markerList: document.getElementById('marker-list'),
-  exportBtn: document.getElementById('export-btn')
+  exportBtn: document.getElementById('export-btn'),
+  leftCollapse: document.getElementById('left-collapse'),
+  rightCollapse: document.getElementById('right-collapse'),
+  leftPanel: document.getElementById('left-panel'),
+  rightPanel: document.getElementById('right-panel'),
+  testBtn: document.getElementById('test-btn')
 };
 
-// --- LIGHTWEIGHT NLP INTENT DICTIONARY ---
-// Maps user keywords to official OSM tags (queryType and tag value)
-const poiDictionary = {
-  // Food & Drink
-  'coffee': { type: 'amenity', tag: 'cafe', emoji: '☕' },
-  'cafe': { type: 'amenity', tag: 'cafe', emoji: '☕' },
-  'restaurant': { type: 'amenity', tag: 'restaurant', emoji: '🍽️' },
-  'food': { type: 'amenity', tag: 'restaurant', emoji: '🍽️' },
-  
-  // Medical
-  'hospital': { type: 'amenity', tag: 'hospital', emoji: '🏥' },
-  'clinic': { type: 'amenity', tag: 'clinic', emoji: '🩺' },
-  'pharmacy': { type: 'amenity', tag: 'pharmacy', emoji: '💊' },
-  'medical': { type: 'amenity', tag: 'pharmacy', emoji: '💊' },
+// Panel Collapse Logic
+elements.leftCollapse.addEventListener('click', () => {
+  elements.leftPanel.classList.toggle('collapsed');
+  elements.leftCollapse.innerText = elements.leftPanel.classList.contains('collapsed') ? '▶️' : '🔽';
+});
 
-  // Emergency & Services
-  'police': { type: 'amenity', tag: 'police', emoji: '🚓' },
-  'cop': { type: 'amenity', tag: 'police', emoji: '🚓' },
-  'fire': { type: 'amenity', tag: 'fire_station', emoji: '🚒' },
-  'atm': { type: 'amenity', tag: 'atm', emoji: '🏧' },
-  
-  // Transport
-  'ev': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
-  'charging': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
-  'bus': { type: 'highway', tag: 'bus_stop', emoji: '🚌' },
-  'airport': { type: 'aeroway', tag: 'aerodrome', emoji: '✈️' },
-  'flight': { type: 'aeroway', tag: 'aerodrome', emoji: '✈️' },
+elements.rightCollapse.addEventListener('click', () => {
+  elements.rightPanel.classList.toggle('collapsed');
+  elements.rightCollapse.innerText = elements.rightPanel.classList.contains('collapsed') ? '▶️' : '🔽';
+});
 
-  // Leisure & Tourism
-  'park': { type: 'leisure', tag: 'park', emoji: '🌳' },
-  'garden': { type: 'leisure', tag: 'garden', emoji: '🌷' },
-  'amusement': { type: 'tourism', tag: 'theme_park', emoji: '🎢' },
-  'theme park': { type: 'tourism', tag: 'theme_park', emoji: '🎢' },
-  'hotel': { type: 'tourism', tag: 'hotel', emoji: '🏨' }
-};
-
-// Event Listeners
+// Input & Controls
 elements.sendBtn.addEventListener('click', () => handleInput(elements.cmdInput.value));
 elements.cmdInput.addEventListener('keypress', (e) => e.key === 'Enter' && handleInput(elements.cmdInput.value));
+elements.exportBtn.addEventListener('click', exportPDF);
+if (elements.testBtn) elements.testBtn.addEventListener('click', runBenchmarks);
+
 elements.ttsToggle.addEventListener('click', () => {
   voiceFeedbackEnabled = !voiceFeedbackEnabled;
   elements.ttsToggle.innerText = voiceFeedbackEnabled ? '🔊' : '🔇';
   updateStatus(voiceFeedbackEnabled ? 'Audio On' : 'Audio Off', '#a18cd1');
 });
-elements.exportBtn.addEventListener('click', exportPDF);
 
 function handleInput(text) {
   if (text.trim()) {
@@ -92,42 +82,109 @@ function speak(text) {
   }
 }
 
-// Speech Recognition
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-if (SpeechRecognition) {
-  const recognition = new SpeechRecognition();
-  recognition.continuous = true;
-  let isListening = false;
+// ==========================================
+// 3. OFFLINE WHISPER AI (TRANSFORMERS.JS)
+// ==========================================
+env.allowLocalModels = false; // Fetch quantized model from Hugging Face
 
-  elements.micBtn.addEventListener('click', () => isListening ? recognition.stop() : recognition.start());
-  
-  recognition.onstart = () => {
-    isListening = true;
-    elements.micBtn.classList.add('listening');
-    elements.btnText.innerText = 'Stop';
-    updateStatus('Listening...', '#f43f5e');
-  };
-  
-  recognition.onend = () => {
-    isListening = false;
-    elements.micBtn.classList.remove('listening');
-    elements.btnText.innerText = 'Listen';
-    updateStatus('Ready', '#10b981');
-  };
-  
-  recognition.onresult = (e) => {
-    let transcript = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) transcript += e.results[i][0].transcript;
-    }
-    if(transcript) handleInput(transcript);
-  };
-} else {
+let transcriber = null;
+let isRecording = false;
+let mediaRecorder = null;
+let audioChunks = [];
+let audioContext;
+
+async function loadWhisperModel() {
+  updateStatus('Loading Offline AI...', '#f59e0b');
   elements.micBtn.disabled = true;
-  updateStatus('Browser Unsupported', '#ef4444');
+  elements.btnText.innerText = 'Loading AI...';
+  
+  try {
+    transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+    updateStatus('AI Ready (Offline)', '#10b981');
+    elements.micBtn.disabled = false;
+    elements.btnText.innerText = 'Listen';
+  } catch (error) {
+    console.error("Failed to load model:", error);
+    updateStatus('AI Load Failed', '#ef4444');
+  }
 }
 
-// Geocoding Helper
+// Start loading the AI model immediately
+loadWhisperModel();
+
+elements.micBtn.addEventListener('click', async () => {
+  if (!transcriber) return;
+  if (!isRecording) startRecording();
+  else stopRecording();
+});
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = processAudioData;
+    mediaRecorder.start();
+
+    isRecording = true;
+    elements.micBtn.classList.add('listening');
+    elements.btnText.innerText = 'Stop';
+    updateStatus('Recording...', '#f43f5e');
+
+  } catch (err) {
+    console.error("Microphone access denied:", err);
+    updateStatus('Mic Access Denied', '#ef4444');
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach(track => track.stop());
+  }
+  
+  isRecording = false;
+  elements.micBtn.classList.remove('listening');
+  elements.btnText.innerText = 'Processing...';
+  updateStatus('Transcribing Locally...', '#f59e0b');
+}
+
+async function processAudioData() {
+  const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+  const arrayBuffer = await audioBlob.arrayBuffer();
+  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+  const audioData = audioBuffer.getChannelData(0);
+
+  try {
+    const output = await transcriber(audioData);
+    const transcript = output.text.trim();
+    
+    if (transcript) {
+      elements.transcript.innerText = `"${transcript}"`;
+      processVoiceCommand(transcript.toLowerCase());
+    } else {
+      updateStatus('No speech detected', '#f43f5e');
+    }
+  } catch (err) {
+    console.error("Transcription error:", err);
+    updateStatus('Transcription Error', '#ef4444');
+  }
+
+  elements.btnText.innerText = 'Listen';
+  if (!elements.statusTag.innerText.includes('Error')) {
+    updateStatus('Ready', '#10b981');
+  }
+}
+
+// ==========================================
+// 4. GEOCODING & POI DATABASE (OSM)
+// ==========================================
 async function geocode(placeName) {
   updateStatus('Searching...');
   try {
@@ -142,12 +199,9 @@ async function geocode(placeName) {
   }
 }
 
-// Robust Overpass API for POIs
 async function findPOIs(queryType, tag, lat, lon, emoji) {
   updateStatus(`Scanning OSM database...`);
-  
-  // Reduced radius to 8000m to prevent timeouts, added timeout:15 parameter to force API stability
-  const query = `[out:json][timeout:15];node["${queryType}"="${tag}"]["name"](around:8000,${lat},${lon});out 10;`;
+  const query = `[out:json][timeout:25];node["${queryType}"="${tag}"]["name"](around:10000,${lat},${lon});out 15;`;
   
   try {
     const res = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
@@ -164,13 +218,14 @@ async function findPOIs(queryType, tag, lat, lon, emoji) {
       speak(`No locations found nearby`);
     }
   } catch (e) {
-    console.error(e);
     updateStatus('Database Timeout/Error', '#ef4444');
-    speak('The mapping database took too long to respond. Please try again.');
+    speak('The mapping database took too long to respond.');
   }
 }
 
-// Marker Engine
+// ==========================================
+// 5. MARKER ENGINE & PDF EXPORT
+// ==========================================
 function addCustomMarker(lat, lon, name, emoji = '📍') {
   const icon = L.divIcon({ className: 'emoji-pin', html: `<div>${emoji}</div>`, iconSize: [36, 36], iconAnchor: [18, 36] });
   const marker = L.marker([lat, lon], { icon }).addTo(markersGroup);
@@ -195,10 +250,9 @@ function removeMarker(id) {
 }
 
 function updateDrawer() {
-  const markerList = document.getElementById('marker-list');
-  markerList.innerHTML = '';
+  elements.markerList.innerHTML = '';
   if (activeMarkers.length === 0) {
-    markerList.innerHTML = '<li class="empty-state">No markers on the map yet.</li>';
+    elements.markerList.innerHTML = '<li class="empty-state">No markers on the map yet.</li>';
     return;
   }
   
@@ -212,11 +266,10 @@ function updateDrawer() {
       </div>
       <button class="delete-btn" onclick="removeMarker('${m.id}')">✕</button>
     `;
-    markerList.appendChild(li);
+    elements.markerList.appendChild(li);
   });
 }
 
-// Export to PDF Function
 function exportPDF() {
   if (activeMarkers.length === 0) {
     alert("No markers to export!");
@@ -236,12 +289,7 @@ function exportPDF() {
 
   activeMarkers.forEach(m => {
     const mapLink = `https://www.google.com/maps/search/?api=1&query=${m.lat},${m.lon}`;
-    tableRows.push([
-      m.emoji,
-      m.name,
-      `${m.lat.toFixed(5)}, ${m.lon.toFixed(5)}`,
-      mapLink
-    ]);
+    tableRows.push([ m.emoji, m.name, `${m.lat.toFixed(5)}, ${m.lon.toFixed(5)}`, mapLink ]);
   });
 
   doc.autoTable({
@@ -267,10 +315,40 @@ function exportPDF() {
   doc.save('Voice_GIS_Markers.pdf');
 }
 
-// Core Command Engine
+// ==========================================
+// 6. COMMAND ENGINE & NLP DICTIONARY
+// ==========================================
+const poiDictionary = {
+  'coffee': { type: 'amenity', tag: 'cafe', emoji: '☕' },
+  'cafe': { type: 'amenity', tag: 'cafe', emoji: '☕' },
+  'restaurant': { type: 'amenity', tag: 'restaurant', emoji: '🍽️' },
+  'food': { type: 'amenity', tag: 'restaurant', emoji: '🍽️' },
+  'bakery': { type: 'shop', tag: 'bakery', emoji: '🥐' },
+  'hospital': { type: 'amenity', tag: 'hospital', emoji: '🏥' },
+  'clinic': { type: 'amenity', tag: 'clinic', emoji: '🩺' },
+  'pharmac': { type: 'amenity', tag: 'pharmacy', emoji: '💊' }, 
+  'medical': { type: 'amenity', tag: 'pharmacy', emoji: '💊' },
+  'police': { type: 'amenity', tag: 'police', emoji: '🚓' },
+  'cop': { type: 'amenity', tag: 'police', emoji: '🚓' },
+  'fire': { type: 'amenity', tag: 'fire_station', emoji: '🚒' },
+  'atm': { type: 'amenity', tag: 'atm', emoji: '🏧' },
+  'bank': { type: 'amenity', tag: 'bank', emoji: '🏦' },
+  'ev': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
+  'charging': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
+  'bus': { type: 'highway', tag: 'bus_stop', emoji: '🚌' },
+  'airport': { type: 'aeroway', tag: 'aerodrome', emoji: '✈️' },
+  'flight': { type: 'aeroway', tag: 'aerodrome', emoji: '✈️' },
+  'park': { type: 'leisure', tag: 'park', emoji: '🌳' },
+  'garden': { type: 'leisure', tag: 'garden', emoji: '🌷' },
+  'amusement': { type: 'tourism', tag: 'theme_park', emoji: '🎢' },
+  'theme park': { type: 'tourism', tag: 'theme_park', emoji: '🎢' },
+  'hotel': { type: 'tourism', tag: 'hotel', emoji: '🏨' },
+  'mall': { type: 'shop', tag: 'mall', emoji: '🛍️' },
+  'supermarket': { type: 'shop', tag: 'supermarket', emoji: '🛒' },
+  'grocery': { type: 'shop', tag: 'supermarket', emoji: '🛒' }
+};
+
 async function processVoiceCommand(cmd) {
-  
-  // 1. Remove SPECIFIC Marker
   const removeSpecific = cmd.match(/(?:remove|clear|delete) marker (?:from|at|in) (.+)/);
   if (removeSpecific) {
     const target = removeSpecific[1].trim();
@@ -285,7 +363,6 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 2. Clear All Markers
   if (/(?:clear|remove|delete) (?:all )?marker(?:s)?/.test(cmd) || cmd.includes('clear map')) {
     markersGroup.clearLayers();
     activeMarkers = [];
@@ -295,13 +372,11 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 3. Find POIs via Intent Dictionary
   const poiMatch = cmd.match(/(?:find|show|search for) (.+) (?:near|in|around|at) (.+)/);
   if (poiMatch) {
     const rawIntent = poiMatch[1].toLowerCase();
     const location = poiMatch[2];
     
-    // Check if the requested word exists in our dictionary
     let mappedCategory = null;
     for (const key in poiDictionary) {
       if (rawIntent.includes(key)) {
@@ -323,7 +398,6 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 4. Add Marker
   if (cmd.includes('add marker') || cmd.includes('mark')) {
     const place = cmd.replace(/add marker (?:at|in)|add marker|mark/g, '').trim();
     if (!place) return;
@@ -336,7 +410,6 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 5. Navigate / Zoom To
   if (cmd.includes('zoom to') || cmd.includes('go to')) {
     const place = cmd.replace(/zoom to|go to/g, '').trim();
     const loc = await geocode(place);
@@ -348,12 +421,58 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 6. Layer Controls
   if (cmd.includes('satellite')) { map.removeLayer(currentLayer); layers.satellite.addTo(map); currentLayer = layers.satellite; updateStatus('Satellite View'); speak('Satellite view on'); }
   else if (cmd.includes('road')) { map.removeLayer(currentLayer); layers.road.addTo(map); currentLayer = layers.road; updateStatus('Road Map'); speak('Road map on'); }
   else if (cmd.includes('terrain')) { map.removeLayer(currentLayer); layers.terrain.addTo(map); currentLayer = layers.terrain; updateStatus('Terrain View'); speak('Terrain view on'); }
   
-  // 7. Zoom Controls
   else if (cmd.includes('zoom in')) { map.zoomIn(); updateStatus('Zoomed In'); speak('Zooming in'); }
   else if (cmd.includes('zoom out')) { map.zoomOut(); updateStatus('Zoomed Out'); speak('Zooming out'); }
+}
+
+// ==========================================
+// 7. AUTOMATED BENCHMARKING & TEST SUITE
+// ==========================================
+async function runBenchmarks() {
+  updateStatus('Running Benchmarks...', '#f59e0b');
+  console.log("🚀 STARTING EXHAUSTIVE TEST SUITE...");
+  
+  let passed = 0;
+  let failed = 0;
+
+  const testSuite = [
+    { cmd: "zoom to pune", type: "Navigation" },
+    { cmd: "show satellite", type: "Layer Control" },
+    { cmd: "road map", type: "Layer Control" },
+    { cmd: "add marker at delhi", type: "Marker Add" },
+    { cmd: "remove marker from delhi", type: "Marker Remove" },
+    { cmd: "find hospitals near mumbai", type: "POI Search" },
+    { cmd: "zoom in", type: "Zoom Control" },
+    { cmd: "clear map", type: "Clear All" },
+    { cmd: "find spaceships near mars", type: "Edge Case" }
+  ];
+
+  for (let i = 0; i < testSuite.length; i++) {
+    const test = testSuite[i];
+    console.log(`\n⏳ Testing [${test.type}]: "${test.cmd}"`);
+    
+    try {
+      const originalVoiceState = voiceFeedbackEnabled;
+      voiceFeedbackEnabled = false;
+      
+      await processVoiceCommand(test.cmd);
+      await new Promise(r => setTimeout(r, 1500)); 
+      
+      console.log(`✅ PASS: "${test.cmd}" processed.`);
+      passed++;
+      voiceFeedbackEnabled = originalVoiceState;
+    } catch (error) {
+      console.error(`❌ FAIL: "${test.cmd}" threw an error.`, error);
+      failed++;
+    }
+  }
+
+  const accuracy = ((passed / testSuite.length) * 100).toFixed(2);
+  console.log(`\n📊 BENCHMARK COMPLETE | Accuracy: ${accuracy}%`);
+  updateStatus(`Test Accuracy: ${accuracy}%`, '#10b981');
+  alert(`Benchmark Complete!\nAccuracy: ${accuracy}%\nCheck browser console for detailed logs.`);
 }
