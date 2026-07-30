@@ -3,97 +3,97 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Voice GIS - Chandana Galgali</title>
+  <title>Voice-Enabled Geospatial UI</title>
   
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css" />
-  
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <!-- Hugging Face Transformers.js for Offline AI -->
-  <script type="module" src="https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
-  <!-- Left: Main Control Dashboard -->
-  <div class="dashboard left-panel" id="left-panel">
-    <div class="header">
-      <div class="title-group">
-        <span class="badge">Built by Chandana Galgali</span>
-        <h2>Voice GIS Explorer</h2>
-      </div>
-      <div class="controls">
-        <button id="tts-toggle" class="icon-btn" title="Toggle Voice Feedback">🔊</button>
-        <button id="left-collapse" class="icon-btn collapse-btn" title="Minimize Panel">🔽</button>
-      </div>
-    </div>
-
-    <div class="panel-content">
-      <div class="controls-main">
-        <button id="mic-btn" class="mic-btn">
-          <span class="mic-icon">🎙️</span>
-          <span id="btn-text">Listen</span>
-        </button>
-      </div>
-
-      <div class="text-input-box">
-        <input type="text" id="cmd-input" placeholder="e.g. Find coffee shops in Delhi..." autocomplete="off" />
-        <button id="send-btn" class="send-btn">Send</button>
-      </div>
-
-      <div class="info-row">
-        <div class="transcript-box">
-          <span class="label">Live Transcript</span>
-          <p id="transcript" class="transcript-text">Waiting...</p>
-        </div>
-        <div class="status-box">
-          <span class="label">Status</span>
-          <span id="status-tag" class="status-tag">Ready</span>
-        </div>
-      </div>
-
-      <div class="cheatsheet">
-        <h3>🗣️ Supported Search Categories:</h3>
-        <div class="category-grid">
-          <span>☕ Coffee Shops</span>
-          <span>🏥 Hospitals</span>
-          <span>🍽️ Restaurants</span>
-          <span>⚡ EV Charging</span>
-          <span>🚒 Fire Stations</span>
-          <span>🚌 Bus Stops</span>
-          <span>✈️ Airports</span>
-          <span>🚓 Police</span>
-          <span>💊 Pharmacies</span>
-          <span>🌳 Parks</span>
-          <span>🏨 Hotels</span>
-          <span>🏧 ATMs</span>
-        </div>
-        <p class="hint">Try: <i>"Find [category] in [city]"</i> or <i>"Add marker at [place]"</i></p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Right: Marker Management Drawer -->
-  <div class="dashboard right-panel" id="right-panel">
-    <div class="header">
-      <h2>📍 Active Markers</h2>
-      <div class="controls">
-        <button id="export-btn" class="export-btn" title="Export as PDF">📄 Export PDF</button>
-        <button id="right-collapse" class="icon-btn collapse-btn" title="Minimize Panel">🔽</button>
-      </div>
-    </div>
-    
-    <div class="panel-content">
-      <ul id="marker-list" class="marker-list">
-        <li class="empty-state">No markers on the map yet.</li>
-      </ul>
-    </div>
-  </div>
-
+  
   <div id="map"></div>
 
+<!-- ========================================== -->
+  <!-- LEFT PANEL -->
+  <!-- ========================================== -->
+  <div id="left-panel" class="side-panel left-panel">
+    <div class="panel-content">
+      
+      <!-- ALWAYS VISIBLE HEADER -->
+      <div class="panel-header">
+        <img src="https://upload.wikimedia.org/wikipedia/commons/b/bd/Indian_Space_Research_Organisation_Logo.svg" alt="ISRO Logo" class="isro-logo-small">
+        <div class="header-text">
+          <h2>Voice Geospatial UI</h2>
+          <p class="hackathon-tag">ISRO Hackathon 2024</p>
+          <p class="author-tag">Built by Chandana Galgali</p>
+        </div>
+      </div>
+
+      <!-- COLLAPSIBLE BODY -->
+      <div class="collapsible-body">
+        <div class="mic-container">
+          <button id="mic-btn" class="mic-btn">
+            <span class="icon">🎙️</span>
+            <span id="btn-text">Listen</span>
+          </button>
+        </div>
+
+        <div class="status-container">
+          <span id="status-tag">Ready</span>
+          <button id="tts-toggle" title="Toggle Audio Feedback">🔊</button>
+        </div>
+
+        <div class="transcript-box">
+          <p id="transcript">"Your command will appear here"</p>
+        </div>
+
+        <div class="fallback-input">
+          <input type="text" id="cmd-input" placeholder="Type command manually...">
+          <button id="send-btn">Send</button>
+        </div>
+
+        <!-- Sample Commands with New Views -->
+        <div class="sample-commands">
+          <p class="section-title">Try clicking these examples:</p>
+          <div class="cmd-chips">
+            <span class="cmd-chip">Show satellite view</span>
+            <span class="cmd-chip">Show road view</span>
+            <span class="cmd-chip">Show terrain view</span>
+            <span class="cmd-chip">Find cafes near Mumbai</span>
+            <span class="cmd-chip">Zoom to Delhi</span>
+            <span class="cmd-chip">Clear map</span>
+          </div>
+        </div>
+      </div> <!-- End collapsible-body -->
+      
+    </div>
+    <button id="left-collapse" class="collapse-btn">🔼</button>
+  </div>
+
+  <!-- ========================================== -->
+  <!-- RIGHT PANEL -->
+  <!-- ========================================== -->
+  <div id="right-panel" class="side-panel right-panel">
+    <div class="panel-content">
+      
+      <!-- ALWAYS VISIBLE HEADER -->
+      <h3>📍 Active POIs</h3>
+      
+      <!-- COLLAPSIBLE BODY -->
+      <div class="collapsible-body">
+        <ul id="marker-list">
+          <li class="empty-state">No markers on the map yet.</li>
+        </ul>
+        <button id="export-btn" class="export-btn">📥 Export to PDF</button>
+      </div> <!-- End collapsible-body -->
+
+    </div>
+    <button id="right-collapse" class="collapse-btn">🔼</button>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

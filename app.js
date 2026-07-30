@@ -34,26 +34,33 @@ const elements = {
   leftCollapse: document.getElementById('left-collapse'),
   rightCollapse: document.getElementById('right-collapse'),
   leftPanel: document.getElementById('left-panel'),
-  rightPanel: document.getElementById('right-panel'),
-  testBtn: document.getElementById('test-btn')
+  rightPanel: document.getElementById('right-panel')
 };
 
-// Panel Collapse Logic
+// Panel Collapse Logic (Corrected Arrows)
 elements.leftCollapse.addEventListener('click', () => {
   elements.leftPanel.classList.toggle('collapsed');
-  elements.leftCollapse.innerText = elements.leftPanel.classList.contains('collapsed') ? '▶️' : '🔽';
+  elements.leftCollapse.innerText = elements.leftPanel.classList.contains('collapsed') ? '🔽' : '🔼';
 });
 
 elements.rightCollapse.addEventListener('click', () => {
   elements.rightPanel.classList.toggle('collapsed');
-  elements.rightCollapse.innerText = elements.rightPanel.classList.contains('collapsed') ? '▶️' : '🔽';
+  elements.rightCollapse.innerText = elements.rightPanel.classList.contains('collapsed') ? '🔽' : '🔼';
+});
+
+// Clickable Sample Commands Logic
+document.querySelectorAll('.cmd-chip').forEach(chip => {
+  chip.addEventListener('click', (e) => {
+    const cmd = e.target.innerText;
+    elements.cmdInput.value = cmd; // Fills the input box visually
+    handleInput(cmd); // Immediately processes it
+  });
 });
 
 // Input & Controls
 elements.sendBtn.addEventListener('click', () => handleInput(elements.cmdInput.value));
 elements.cmdInput.addEventListener('keypress', (e) => e.key === 'Enter' && handleInput(elements.cmdInput.value));
 elements.exportBtn.addEventListener('click', exportPDF);
-if (elements.testBtn) elements.testBtn.addEventListener('click', runBenchmarks);
 
 elements.ttsToggle.addEventListener('click', () => {
   voiceFeedbackEnabled = !voiceFeedbackEnabled;
@@ -120,7 +127,10 @@ elements.micBtn.addEventListener('click', async () => {
 
 async function startRecording() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Inside startRecording(), change the getUserMedia line to this:
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { noiseSuppression: true, echoCancellation: true } 
+    });
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     mediaRecorder = new MediaRecorder(stream);
     audioChunks = [];
@@ -165,20 +175,20 @@ async function processAudioData() {
     const output = await transcriber(audioData);
     const transcript = output.text.trim();
     
+    // Reset button text
+    elements.btnText.innerText = 'Listen';
+
     if (transcript) {
       elements.transcript.innerText = `"${transcript}"`;
       processVoiceCommand(transcript.toLowerCase());
     } else {
       updateStatus('No speech detected', '#f43f5e');
+      speak('I did not catch that.');
     }
   } catch (err) {
     console.error("Transcription error:", err);
     updateStatus('Transcription Error', '#ef4444');
-  }
-
-  elements.btnText.innerText = 'Listen';
-  if (!elements.statusTag.innerText.includes('Error')) {
-    updateStatus('Ready', '#10b981');
+    elements.btnText.innerText = 'Listen';
   }
 }
 
@@ -200,16 +210,37 @@ async function geocode(placeName) {
 }
 
 async function findPOIs(queryType, tag, lat, lon, emoji) {
-  updateStatus(`Scanning OSM database...`);
-  const query = `[out:json][timeout:25];node["${queryType}"="${tag}"]["name"](around:10000,${lat},${lon});out 15;`;
+  updateStatus(`Scanning OSM database...`, '#f59e0b');
+  
+  // FIX: Using 'nwr' (node, way, relation) to catch massive buildings like airports
+  // FIX: Added 'out center' so polygons are reduced to a single latitude/longitude pin
+  const query = `[out:json][timeout:15];nwr["${queryType}"="${tag}"](around:5000,${lat},${lon});out center 15;`;
   
   try {
-    const res = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
-    if (!res.ok) throw new Error('API Rate Limit or Timeout');
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: `data=${encodeURIComponent(query)}`
+    });
+
+    if (!res.ok) {
+      if (res.status === 429) throw new Error('Rate Limited. Wait a minute.');
+      throw new Error(`API Error`);
+    }
     
     const data = await res.json();
+    
     if (data.elements && data.elements.length > 0) {
-      data.elements.forEach(el => addCustomMarker(el.lat, el.lon, el.tags.name, emoji));
+      data.elements.forEach(el => {
+        // Extract center lat/lon for polygons, or normal lat/lon for nodes
+        const pLat = el.center ? el.center.lat : el.lat;
+        const pLon = el.center ? el.center.lon : el.lon;
+        const pName = el.tags && el.tags.name ? el.tags.name : tag;
+        addCustomMarker(pLat, pLon, pName, emoji);
+      });
       map.setView([lat, lon], 12); 
       updateStatus(`Found ${data.elements.length} locations`, '#10b981');
       speak(`Found nearby locations`);
@@ -218,8 +249,10 @@ async function findPOIs(queryType, tag, lat, lon, emoji) {
       speak(`No locations found nearby`);
     }
   } catch (e) {
-    updateStatus('Database Timeout/Error', '#ef4444');
-    speak('The mapping database took too long to respond.');
+    console.error("OVERPASS ERROR:", e.message);
+    // Graceful error handling instead of technical jargon
+    updateStatus('Not available in database', '#f59e0b');
+    speak('This data is currently unavailable or too large to fetch.');
   }
 }
 
@@ -249,6 +282,10 @@ function removeMarker(id) {
   updateDrawer();
 }
 
+// Expose these to the global window so HTML buttons can trigger them
+window.removeMarker = removeMarker;
+window.flyToLocation = (lat, lon) => map.flyTo([lat, lon], 15);
+
 function updateDrawer() {
   elements.markerList.innerHTML = '';
   if (activeMarkers.length === 0) {
@@ -260,11 +297,11 @@ function updateDrawer() {
     const li = document.createElement('li');
     li.className = 'marker-item';
     li.innerHTML = `
-      <div class="marker-info" onclick="map.flyTo([${m.lat}, ${m.lon}], 15)">
+      <div class="marker-info" onclick="window.flyToLocation(${m.lat}, ${m.lon})">
         <h4>${m.emoji} ${m.name.split(',')[0]}</h4>
         <p>${m.lat.toFixed(4)}, ${m.lon.toFixed(4)}</p>
       </div>
-      <button class="delete-btn" onclick="removeMarker('${m.id}')">✕</button>
+      <button class="delete-btn" onclick="window.removeMarker('${m.id}')">✕</button>
     `;
     elements.markerList.appendChild(li);
   });
@@ -280,7 +317,7 @@ function exportPDF() {
   const doc = new jsPDF('landscape'); 
   
   doc.setFontSize(22);
-  doc.text("Exported Map Data - Chandana Galgali", 14, 22);
+  doc.text("Exported Map Data", 14, 22);
   doc.setFontSize(11);
   doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 30);
   
@@ -349,6 +386,7 @@ const poiDictionary = {
 };
 
 async function processVoiceCommand(cmd) {
+  // 1. Specific Marker Deletion
   const removeSpecific = cmd.match(/(?:remove|clear|delete) marker (?:from|at|in) (.+)/);
   if (removeSpecific) {
     const target = removeSpecific[1].trim();
@@ -359,19 +397,22 @@ async function processVoiceCommand(cmd) {
       speak(`Removed marker from ${target}`);
     } else {
       updateStatus(`Not found: ${target}`, '#f43f5e');
+      speak(`I couldn't find a marker for ${target}`);
     }
     return;
   }
 
+  // 2. Clear All Markers
   if (/(?:clear|remove|delete) (?:all )?marker(?:s)?/.test(cmd) || cmd.includes('clear map')) {
     markersGroup.clearLayers();
     activeMarkers = [];
     updateDrawer();
-    updateStatus('Map Cleared');
+    updateStatus('Map Cleared', '#10b981');
     speak('Cleared all markers');
     return;
   }
 
+  // 3. POI Discovery Engine
   const poiMatch = cmd.match(/(?:find|show|search for) (.+) (?:near|in|around|at) (.+)/);
   if (poiMatch) {
     const rawIntent = poiMatch[1].toLowerCase();
@@ -398,6 +439,7 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
+  // 4. Add Custom Marker
   if (cmd.includes('add marker') || cmd.includes('mark')) {
     const place = cmd.replace(/add marker (?:at|in)|add marker|mark/g, '').trim();
     if (!place) return;
@@ -405,74 +447,44 @@ async function processVoiceCommand(cmd) {
     if (loc) {
       map.flyTo([loc.lat, loc.lon], 12);
       addCustomMarker(loc.lat, loc.lon, loc.name);
+      updateStatus(`Marked ${place}`, '#10b981');
       speak(`Marker added at ${place}`);
     }
     return;
   }
 
-  if (cmd.includes('zoom to') || cmd.includes('go to')) {
-    const place = cmd.replace(/zoom to|go to/g, '').trim();
+  // 5. Standard Navigation
+  if (cmd.includes('zoom to') || cmd.includes('go to') || cmd.includes('navigate to')) {
+    const place = cmd.replace(/zoom to|go to|navigate to/g, '').trim();
     const loc = await geocode(place);
     if (loc) {
       map.flyTo([loc.lat, loc.lon], 13);
-      updateStatus(`Navigating to ${place}`);
+      updateStatus(`Navigating to ${place}`, '#10b981');
       speak(`Navigating to ${place}`);
     }
     return;
   }
 
-  if (cmd.includes('satellite')) { map.removeLayer(currentLayer); layers.satellite.addTo(map); currentLayer = layers.satellite; updateStatus('Satellite View'); speak('Satellite view on'); }
-  else if (cmd.includes('road')) { map.removeLayer(currentLayer); layers.road.addTo(map); currentLayer = layers.road; updateStatus('Road Map'); speak('Road map on'); }
-  else if (cmd.includes('terrain')) { map.removeLayer(currentLayer); layers.terrain.addTo(map); currentLayer = layers.terrain; updateStatus('Terrain View'); speak('Terrain view on'); }
-  
-  else if (cmd.includes('zoom in')) { map.zoomIn(); updateStatus('Zoomed In'); speak('Zooming in'); }
-  else if (cmd.includes('zoom out')) { map.zoomOut(); updateStatus('Zoomed Out'); speak('Zooming out'); }
-}
-
-// ==========================================
-// 7. AUTOMATED BENCHMARKING & TEST SUITE
-// ==========================================
-async function runBenchmarks() {
-  updateStatus('Running Benchmarks...', '#f59e0b');
-  console.log("🚀 STARTING EXHAUSTIVE TEST SUITE...");
-  
-  let passed = 0;
-  let failed = 0;
-
-  const testSuite = [
-    { cmd: "zoom to pune", type: "Navigation" },
-    { cmd: "show satellite", type: "Layer Control" },
-    { cmd: "road map", type: "Layer Control" },
-    { cmd: "add marker at delhi", type: "Marker Add" },
-    { cmd: "remove marker from delhi", type: "Marker Remove" },
-    { cmd: "find hospitals near mumbai", type: "POI Search" },
-    { cmd: "zoom in", type: "Zoom Control" },
-    { cmd: "clear map", type: "Clear All" },
-    { cmd: "find spaceships near mars", type: "Edge Case" }
-  ];
-
-  for (let i = 0; i < testSuite.length; i++) {
-    const test = testSuite[i];
-    console.log(`\n⏳ Testing [${test.type}]: "${test.cmd}"`);
-    
-    try {
-      const originalVoiceState = voiceFeedbackEnabled;
-      voiceFeedbackEnabled = false;
-      
-      await processVoiceCommand(test.cmd);
-      await new Promise(r => setTimeout(r, 1500)); 
-      
-      console.log(`✅ PASS: "${test.cmd}" processed.`);
-      passed++;
-      voiceFeedbackEnabled = originalVoiceState;
-    } catch (error) {
-      console.error(`❌ FAIL: "${test.cmd}" threw an error.`, error);
-      failed++;
-    }
+  // 6. Map Layer Controls (Fixed with returns)
+  if (cmd.includes('satellite')) { 
+    map.removeLayer(currentLayer); layers.satellite.addTo(map); currentLayer = layers.satellite; 
+    updateStatus('Satellite View', '#10b981'); speak('Satellite view on'); return; 
   }
+  if (cmd.includes('road')) { 
+    map.removeLayer(currentLayer); layers.road.addTo(map); currentLayer = layers.road; 
+    updateStatus('Road Map', '#10b981'); speak('Road map on'); return; 
+  }
+  if (cmd.includes('terrain')) { 
+    map.removeLayer(currentLayer); layers.terrain.addTo(map); currentLayer = layers.terrain; 
+    updateStatus('Terrain View', '#10b981'); speak('Terrain view on'); return; 
+  }
+  
+  // 7. Zoom Controls (Fixed with returns)
+  if (cmd.includes('zoom in')) { map.zoomIn(); updateStatus('Zoomed In', '#10b981'); speak('Zooming in'); return; }
+  if (cmd.includes('zoom out')) { map.zoomOut(); updateStatus('Zoomed Out', '#10b981'); speak('Zooming out'); return; }
 
-  const accuracy = ((passed / testSuite.length) * 100).toFixed(2);
-  console.log(`\n📊 BENCHMARK COMPLETE | Accuracy: ${accuracy}%`);
-  updateStatus(`Test Accuracy: ${accuracy}%`, '#10b981');
-  alert(`Benchmark Complete!\nAccuracy: ${accuracy}%\nCheck browser console for detailed logs.`);
+  // 8. The Absolute Fallback
+  // If the command reaches this line, it truly matched absolutely nothing above.
+  updateStatus('Command not recognized', '#f43f5e');
+  speak("I didn't understand that command. Please try again.");
 }
