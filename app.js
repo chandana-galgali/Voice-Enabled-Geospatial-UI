@@ -471,20 +471,7 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 5. Standard Navigation (Show / Find / Go / Zoom)
-  const navMatch = cmd.match(/(?:zoom to|go to|navigate to|show me|show|find) (.+)/);
-  if (navMatch) {
-    const place = navMatch[1].trim();
-    const loc = await geocode(place);
-    if (loc) {
-      map.flyTo([loc.lat, loc.lon], 13);
-      updateStatus(`Navigating to ${place}`, '#10b981');
-      speak(`Navigating to ${place}`);
-    }
-    return;
-  }
-
-  // 6. Map Layer Controls
+  // 5. Map Layer Controls (MOVED UP to prevent triggering the geocoder!)
   if (cmd.includes('satellite')) { 
     map.removeLayer(currentLayer); layers.satellite.addTo(map); currentLayer = layers.satellite; 
     updateStatus('Satellite View', '#10b981'); speak('Satellite view on'); return; 
@@ -496,6 +483,19 @@ async function processVoiceCommand(cmd) {
   if (cmd.includes('terrain')) { 
     map.removeLayer(currentLayer); layers.terrain.addTo(map); currentLayer = layers.terrain; 
     updateStatus('Terrain View', '#10b981'); speak('Terrain view on'); return; 
+  }
+
+  // 6. Standard Navigation (Show / Find / Go / Zoom)
+  const navMatch = cmd.match(/(?:zoom to|go to|navigate to|show me|show|find) (.+)/);
+  if (navMatch) {
+    const place = navMatch[1].trim();
+    const loc = await geocode(place);
+    if (loc) {
+      map.flyTo([loc.lat, loc.lon], 13);
+      updateStatus(`Navigating to ${place}`, '#10b981');
+      speak(`Navigating to ${place}`);
+    }
+    return;
   }
   
   // 7. Zoom Controls
