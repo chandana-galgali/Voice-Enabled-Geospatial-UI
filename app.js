@@ -1,7 +1,7 @@
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0';
 
 // ==========================================
-// 1. MAP INITIALIZATION & LAYERS
+// 1. MAP INITIALIZATION & MANUAL LAYER CONTROLS
 // ==========================================
 const map = L.map('map', { zoomControl: false }).setView([20.5937, 78.9629], 5);
 L.control.zoom({ position: 'bottomright' }).addTo(map);
@@ -13,6 +13,14 @@ const layers = {
 };
 layers.road.addTo(map);
 let currentLayer = layers.road;
+
+// NEW: Manual UI control to switch layers in the top right
+const baseMaps = {
+  "Road Map": layers.road,
+  "Satellite View": layers.satellite,
+  "Terrain View": layers.terrain
+};
+L.control.layers(baseMaps, null, { position: 'bottomleft' }).addTo(map);
 
 const markersGroup = L.layerGroup().addTo(map);
 let activeMarkers = []; 
@@ -37,7 +45,6 @@ const elements = {
   rightPanel: document.getElementById('right-panel')
 };
 
-// Panel Collapse Logic (Corrected Arrows)
 elements.leftCollapse.addEventListener('click', () => {
   elements.leftPanel.classList.toggle('collapsed');
   elements.leftCollapse.innerText = elements.leftPanel.classList.contains('collapsed') ? '🔽' : '🔼';
@@ -48,16 +55,14 @@ elements.rightCollapse.addEventListener('click', () => {
   elements.rightCollapse.innerText = elements.rightPanel.classList.contains('collapsed') ? '🔽' : '🔼';
 });
 
-// Clickable Sample Commands Logic
 document.querySelectorAll('.cmd-chip').forEach(chip => {
   chip.addEventListener('click', (e) => {
     const cmd = e.target.innerText;
-    elements.cmdInput.value = cmd; // Fills the input box visually
-    handleInput(cmd); // Immediately processes it
+    elements.cmdInput.value = cmd;
+    handleInput(cmd);
   });
 });
 
-// Input & Controls
 elements.sendBtn.addEventListener('click', () => handleInput(elements.cmdInput.value));
 elements.cmdInput.addEventListener('keypress', (e) => e.key === 'Enter' && handleInput(elements.cmdInput.value));
 elements.exportBtn.addEventListener('click', exportPDF);
@@ -90,9 +95,9 @@ function speak(text) {
 }
 
 // ==========================================
-// 3. OFFLINE WHISPER AI (TRANSFORMERS.JS)
+// 3. OFFLINE WHISPER AI
 // ==========================================
-env.allowLocalModels = false; // Fetch quantized model from Hugging Face
+env.allowLocalModels = false; 
 
 let transcriber = null;
 let isRecording = false;
@@ -116,7 +121,6 @@ async function loadWhisperModel() {
   }
 }
 
-// Start loading the AI model immediately
 loadWhisperModel();
 
 elements.micBtn.addEventListener('click', async () => {
@@ -127,7 +131,6 @@ elements.micBtn.addEventListener('click', async () => {
 
 async function startRecording() {
   try {
-    // Inside startRecording(), change the getUserMedia line to this:
     const stream = await navigator.mediaDevices.getUserMedia({ 
       audio: { noiseSuppression: true, echoCancellation: true } 
     });
@@ -175,7 +178,6 @@ async function processAudioData() {
     const output = await transcriber(audioData);
     const transcript = output.text.trim();
     
-    // Reset button text
     elements.btnText.innerText = 'Listen';
 
     if (transcript) {
@@ -212,9 +214,8 @@ async function geocode(placeName) {
 async function findPOIs(queryType, tag, lat, lon, emoji) {
   updateStatus(`Scanning OSM database...`, '#f59e0b');
   
-  // FIX: Using 'nwr' (node, way, relation) to catch massive buildings like airports
-  // FIX: Added 'out center' so polygons are reduced to a single latitude/longitude pin
-  const query = `[out:json][timeout:15];nwr["${queryType}"="${tag}"](around:5000,${lat},${lon});out center 15;`;
+  // FIX: Reduced radius to 3km, capped results at 25, strict 10s timeout to prevent crash
+  const query = `[out:json][timeout:10];nwr["${queryType}"="${tag}"](around:3000,${lat},${lon});out center 25;`;
   
   try {
     const res = await fetch('https://overpass-api.de/api/interpreter', {
@@ -227,7 +228,7 @@ async function findPOIs(queryType, tag, lat, lon, emoji) {
     });
 
     if (!res.ok) {
-      if (res.status === 429) throw new Error('Rate Limited. Wait a minute.');
+      if (res.status === 429) throw new Error('Rate Limited');
       throw new Error(`API Error`);
     }
     
@@ -235,7 +236,6 @@ async function findPOIs(queryType, tag, lat, lon, emoji) {
     
     if (data.elements && data.elements.length > 0) {
       data.elements.forEach(el => {
-        // Extract center lat/lon for polygons, or normal lat/lon for nodes
         const pLat = el.center ? el.center.lat : el.lat;
         const pLon = el.center ? el.center.lon : el.lon;
         const pName = el.tags && el.tags.name ? el.tags.name : tag;
@@ -250,7 +250,6 @@ async function findPOIs(queryType, tag, lat, lon, emoji) {
     }
   } catch (e) {
     console.error("OVERPASS ERROR:", e.message);
-    // Graceful error handling instead of technical jargon
     updateStatus('Not available in database', '#f59e0b');
     speak('This data is currently unavailable or too large to fetch.');
   }
@@ -282,7 +281,6 @@ function removeMarker(id) {
   updateDrawer();
 }
 
-// Expose these to the global window so HTML buttons can trigger them
 window.removeMarker = removeMarker;
 window.flyToLocation = (lat, lon) => map.flyTo([lat, lon], 15);
 
@@ -335,12 +333,7 @@ function exportPDF() {
     startY: 40,
     theme: 'grid',
     styles: { overflow: 'linebreak', cellWidth: 'wrap', font: 'helvetica' },
-    columnStyles: { 
-      0: { cellWidth: 20, halign: 'center' },
-      1: { cellWidth: 70 },
-      2: { cellWidth: 50 },
-      3: { cellWidth: 'auto', textColor: [37, 99, 235] } 
-    },
+    columnStyles: { 0: { cellWidth: 20, halign: 'center' }, 1: { cellWidth: 70 }, 2: { cellWidth: 50 }, 3: { cellWidth: 'auto', textColor: [37, 99, 235] } },
     didDrawCell: function(data) {
       if (data.section === 'body' && data.column.index === 3) {
         doc.textWithLink(data.cell.text[0], data.cell.x + 2, data.cell.y + 5, { url: data.cell.text[0] });
@@ -348,12 +341,11 @@ function exportPDF() {
       }
     }
   });
-  
   doc.save('Voice_GIS_Markers.pdf');
 }
 
 // ==========================================
-// 6. COMMAND ENGINE & NLP DICTIONARY
+// 6. EXPANDED COMMAND ENGINE
 // ==========================================
 const poiDictionary = {
   'coffee': { type: 'amenity', tag: 'cafe', emoji: '☕' },
@@ -362,15 +354,16 @@ const poiDictionary = {
   'food': { type: 'amenity', tag: 'restaurant', emoji: '🍽️' },
   'bakery': { type: 'shop', tag: 'bakery', emoji: '🥐' },
   'hospital': { type: 'amenity', tag: 'hospital', emoji: '🏥' },
+  'medical': { type: 'amenity', tag: 'clinic', emoji: '🩺' },
   'clinic': { type: 'amenity', tag: 'clinic', emoji: '🩺' },
   'pharmac': { type: 'amenity', tag: 'pharmacy', emoji: '💊' }, 
-  'medical': { type: 'amenity', tag: 'pharmacy', emoji: '💊' },
+  'chemist': { type: 'amenity', tag: 'pharmacy', emoji: '💊' }, 
   'police': { type: 'amenity', tag: 'police', emoji: '🚓' },
   'cop': { type: 'amenity', tag: 'police', emoji: '🚓' },
   'fire': { type: 'amenity', tag: 'fire_station', emoji: '🚒' },
   'atm': { type: 'amenity', tag: 'atm', emoji: '🏧' },
   'bank': { type: 'amenity', tag: 'bank', emoji: '🏦' },
-  'ev': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
+  'ev ': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
   'charging': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
   'bus': { type: 'highway', tag: 'bus_stop', emoji: '🚌' },
   'airport': { type: 'aeroway', tag: 'aerodrome', emoji: '✈️' },
@@ -381,19 +374,24 @@ const poiDictionary = {
   'theme park': { type: 'tourism', tag: 'theme_park', emoji: '🎢' },
   'hotel': { type: 'tourism', tag: 'hotel', emoji: '🏨' },
   'mall': { type: 'shop', tag: 'mall', emoji: '🛍️' },
+  'center': { type: 'shop', tag: 'mall', emoji: '🛍️' },
   'supermarket': { type: 'shop', tag: 'supermarket', emoji: '🛒' },
-  'grocery': { type: 'shop', tag: 'supermarket', emoji: '🛒' }
+  'grocery': { type: 'shop', tag: 'supermarket', emoji: '🛒' },
+  'store': { type: 'shop', tag: 'supermarket', emoji: '🛒' },
+  'pub': { type: 'amenity', tag: 'pub', emoji: '🍻' },
+  'bar': { type: 'amenity', tag: 'bar', emoji: '🍺' }
 };
 
 async function processVoiceCommand(cmd) {
-  // 1. Specific Marker Deletion
-  const removeSpecific = cmd.match(/(?:remove|clear|delete) marker (?:from|at|in) (.+)/);
+  // 1. Remove specific marker 
+  const removeSpecific = cmd.match(/(?:remove|clear|delete|erase) (?:a )?marker (?:from|at|in) (.+)|unmark (.+)/);
   if (removeSpecific) {
-    const target = removeSpecific[1].trim();
-    const markerToKill = activeMarkers.find(m => m.name.toLowerCase().includes(target));
-    if (markerToKill) {
-      removeMarker(markerToKill.id);
-      updateStatus(`Removed: ${target}`, '#10b981');
+    const target = (removeSpecific[1] || removeSpecific[2]).trim();
+    const markersToKill = activeMarkers.filter(m => m.name.toLowerCase().includes(target));
+    
+    if (markersToKill.length > 0) {
+      markersToKill.forEach(m => removeMarker(m.id));
+      updateStatus(`Removed ${target}`, '#10b981');
       speak(`Removed marker from ${target}`);
     } else {
       updateStatus(`Not found: ${target}`, '#f43f5e');
@@ -413,7 +411,7 @@ async function processVoiceCommand(cmd) {
   }
 
   // 3. POI Discovery Engine
-  const poiMatch = cmd.match(/(?:find|show|search for) (.+) (?:near|in|around|at) (.+)/);
+  const poiMatch = cmd.match(/(?:find|show me|show|search for) (.+) (?:near|in|around|at) (.+)/);
   if (poiMatch) {
     const rawIntent = poiMatch[1].toLowerCase();
     const location = poiMatch[2];
@@ -439,10 +437,10 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 4. Add Custom Marker
-  if (cmd.includes('add marker') || cmd.includes('mark')) {
-    const place = cmd.replace(/add marker (?:at|in)|add marker|mark/g, '').trim();
-    if (!place) return;
+  // 4. Add Custom Marker 
+  const addMatch = cmd.match(/(?:add|drop|put|place) (?:a )?marker (?:at|in|on) (.+)/) || cmd.match(/mark (.+)/);
+  if (addMatch) {
+    const place = addMatch[1].trim();
     const loc = await geocode(place);
     if (loc) {
       map.flyTo([loc.lat, loc.lon], 12);
@@ -453,9 +451,10 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 5. Standard Navigation
-  if (cmd.includes('zoom to') || cmd.includes('go to') || cmd.includes('navigate to')) {
-    const place = cmd.replace(/zoom to|go to|navigate to/g, '').trim();
+  // 5. Standard Navigation (Show / Find / Go / Zoom)
+  const navMatch = cmd.match(/(?:zoom to|go to|navigate to|show me|show|find) (.+)/);
+  if (navMatch) {
+    const place = navMatch[1].trim();
     const loc = await geocode(place);
     if (loc) {
       map.flyTo([loc.lat, loc.lon], 13);
@@ -465,7 +464,7 @@ async function processVoiceCommand(cmd) {
     return;
   }
 
-  // 6. Map Layer Controls (Fixed with returns)
+  // 6. Map Layer Controls
   if (cmd.includes('satellite')) { 
     map.removeLayer(currentLayer); layers.satellite.addTo(map); currentLayer = layers.satellite; 
     updateStatus('Satellite View', '#10b981'); speak('Satellite view on'); return; 
@@ -479,12 +478,73 @@ async function processVoiceCommand(cmd) {
     updateStatus('Terrain View', '#10b981'); speak('Terrain view on'); return; 
   }
   
-  // 7. Zoom Controls (Fixed with returns)
+  // 7. Zoom Controls
   if (cmd.includes('zoom in')) { map.zoomIn(); updateStatus('Zoomed In', '#10b981'); speak('Zooming in'); return; }
   if (cmd.includes('zoom out')) { map.zoomOut(); updateStatus('Zoomed Out', '#10b981'); speak('Zooming out'); return; }
 
   // 8. The Absolute Fallback
-  // If the command reaches this line, it truly matched absolutely nothing above.
   updateStatus('Command not recognized', '#f43f5e');
   speak("I didn't understand that command. Please try again.");
 }
+
+// ==========================================
+// MANUAL CLICK-TO-DROP MARKER LOGIC
+// ==========================================
+let isPlacingMarker = false;
+const manualBtn = document.getElementById('manual-marker-btn');
+
+manualBtn.addEventListener('click', (e) => {
+  e.stopPropagation(); // FIX: Prevents the button click from instantly triggering a map click
+  isPlacingMarker = !isPlacingMarker;
+  
+  if (isPlacingMarker) {
+    manualBtn.classList.add('active');
+    manualBtn.innerText = '❌ Cancel Pin Drop';
+    
+    // FIX: Literally turns your mouse cursor into a map pin!
+    map.getContainer().style.cursor = "url('https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png') 12 41, crosshair";
+    
+    updateStatus('Click anywhere on map to drop pin', '#f59e0b');
+  } else {
+    cancelManualMarker();
+  }
+});
+
+function cancelManualMarker() {
+  isPlacingMarker = false;
+  manualBtn.classList.remove('active');
+  manualBtn.innerText = '📍 Add Pin manually';
+  map.getContainer().style.cursor = ''; // Resets the cursor back to normal pointer
+  if (!elements.statusTag.innerText.includes('Error')) {
+    updateStatus('Ready', '#10b981');
+  }
+}
+
+map.on('click', async (e) => {
+  if (!isPlacingMarker) return; 
+  
+  const lat = e.latlng.lat;
+  const lon = e.latlng.lng;
+  
+  // Reset the UI and cursor immediately after they click the map
+  cancelManualMarker();
+  updateStatus('Identifying location...', '#f59e0b');
+  
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+    const data = await res.json();
+    
+    let placeName = "Custom Location";
+    if (data.name) placeName = data.name;
+    else if (data.address && data.address.city) placeName = data.address.city;
+    else if (data.address && data.address.town) placeName = data.address.town;
+    else if (data.address && data.address.village) placeName = data.address.village;
+    
+    addCustomMarker(lat, lon, placeName, '📍');
+    updateStatus(`Marked ${placeName}`, '#10b981');
+    speak('Marker placed.');
+  } catch (err) {
+    addCustomMarker(lat, lon, "Custom Location", '📍');
+    updateStatus('Marked Custom Location', '#10b981');
+  }
+});

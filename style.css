@@ -93,3 +93,67 @@ body, html { height: 100%; font-family: 'Outfit', sans-serif; background: #0f172
 .leaflet-control-zoom { border: none !important; margin: 20px !important; }
 .leaflet-control-zoom a { background: rgba(15, 23, 42, 0.85) !important; color: white !important; border-color: rgba(255, 255, 255, 0.1) !important; }
 .emoji-pin { text-align: center; font-size: 28px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
+
+/* ==========================================
+   MANUAL MARKER BUTTON & CROSSHAIR
+========================================== */
+.manual-marker-fab {
+  position: absolute;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 30px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+  transition: all 0.2s;
+}
+
+.manual-marker-fab:hover {
+  background: #2563eb;
+  transform: translateX(-50%) scale(1.05);
+}
+
+.manual-marker-fab.active {
+  background: #ef4444; /* Turns red when ready to click */
+  animation: pulse 1.5s infinite;
+}
+
+.leaflet-container.crosshair-cursor-enabled {
+  cursor: crosshair !important;
+}
+
+/* ==========================================
+   MOBILE RESPONSIVENESS (PHONES & TABLETS)
+========================================== */
+@media (max-width: 768px) {
+  .side-panel {
+    width: 92%;
+    left: 4%;
+    right: 4%;
+  }
+  
+  .left-panel { 
+    top: 10px; 
+  }
+  
+  .right-panel { 
+    top: auto; 
+    bottom: 90px; /* Snaps to bottom on phones */
+  }
+
+  .manual-marker-fab {
+    bottom: 25px; /* Moves up slightly on phones */
+  }
+  
+  .leaflet-control-layers {
+    margin-bottom: 90px !important; /* Pushes native layer control up */
+  }
+}
