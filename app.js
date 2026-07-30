@@ -322,9 +322,23 @@ function exportPDF() {
   const tableColumn = ["Category", "Location Name", "Coordinates (Lat, Lon)", "Google Maps Link"];
   const tableRows = [];
 
+  // NEW: Dictionary to convert emojis to clean text for the PDF
+  const pdfCategoryMap = {
+    '☕': 'Cafe', '🍽️': 'Restaurant', '🥐': 'Bakery', '🏥': 'Hospital', 
+    '🩺': 'Clinic', '💊': 'Pharmacy', '🚓': 'Police', '🚒': 'Fire Dept', 
+    '🏧': 'ATM', '🏦': 'Bank', '⚡': 'EV Station', '🚌': 'Bus Stop', 
+    '✈️': 'Airport', '🌳': 'Park', '🌷': 'Garden', '🎢': 'Theme Park', 
+    '🏨': 'Hotel', '🛍️': 'Mall', '🛒': 'Supermarket', '🍻': 'Pub', 
+    '🍺': 'Bar', '📍': 'Pinned Location'
+  };
+
   activeMarkers.forEach(m => {
     const mapLink = `https://www.google.com/maps/search/?api=1&query=${m.lat},${m.lon}`;
-    tableRows.push([ m.emoji, m.name, `${m.lat.toFixed(5)}, ${m.lon.toFixed(5)}`, mapLink ]);
+    
+    // Safely map the emoji to text, fallback to 'Custom POI' if missing
+    const cleanCategory = pdfCategoryMap[m.emoji] || 'Custom POI'; 
+    
+    tableRows.push([ cleanCategory, m.name, `${m.lat.toFixed(5)}, ${m.lon.toFixed(5)}`, mapLink ]);
   });
 
   doc.autoTable({
@@ -333,7 +347,12 @@ function exportPDF() {
     startY: 40,
     theme: 'grid',
     styles: { overflow: 'linebreak', cellWidth: 'wrap', font: 'helvetica' },
-    columnStyles: { 0: { cellWidth: 20, halign: 'center' }, 1: { cellWidth: 70 }, 2: { cellWidth: 50 }, 3: { cellWidth: 'auto', textColor: [37, 99, 235] } },
+    columnStyles: { 
+      0: { cellWidth: 35, halign: 'center' }, // Made this slightly wider for the text
+      1: { cellWidth: 65 }, 
+      2: { cellWidth: 50 }, 
+      3: { cellWidth: 'auto', textColor: [37, 99, 235] } 
+    },
     didDrawCell: function(data) {
       if (data.section === 'body' && data.column.index === 3) {
         doc.textWithLink(data.cell.text[0], data.cell.x + 2, data.cell.y + 5, { url: data.cell.text[0] });
@@ -341,6 +360,7 @@ function exportPDF() {
       }
     }
   });
+  
   doc.save('Voice_GIS_Markers.pdf');
 }
 
