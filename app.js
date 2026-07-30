@@ -106,7 +106,7 @@ async function loadWhisperModel() {
   elements.btnText.innerText = 'Loading AI...';
   
   try {
-    transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+    transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en');
     updateStatus('AI Ready (Offline)', '#10b981');
     elements.micBtn.disabled = false;
     elements.btnText.innerText = 'Listen';
