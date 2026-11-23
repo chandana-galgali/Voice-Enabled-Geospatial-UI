@@ -18,7 +18,7 @@
 </head>
 <body>
 <h1>Speech benchmark: Whisper (Xenova/whisper-base.en) + command parser</h1>
-<p>This page uses the same Transformers.js version, model and audio path as <code>app.js</code>. Read each prompt aloud naturally, then press Stop (or the space bar). It measures real latency and real end-to-end accuracy on your voice and machine.</p>
+<p>This page loads Whisper with the exact same code as the app (<code>speech.js</code>) and scores with the app's parser (<code>commands.js</code>). Add <code>?device=webgpu</code> to the URL to try the GPU path. Read each prompt aloud naturally, then press Stop (or the space bar). It measures real latency and real end-to-end accuracy on your voice and machine.</p>
 <p id="status">Loading model…</p>
 <p id="env"></p>
 
@@ -34,9 +34,8 @@
 <table><thead><tr><th>#</th><th>Expected</th><th>Whisper heard</th><th>Audio s</th><th>STT ms</th><th>Intent</th></tr></thead><tbody id="rows"></tbody></table>
 
 <script type="module">
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0';
-import { parse } from './parser.mjs';
-env.allowLocalModels = false;
+import { loadTranscriber } from '../speech.js';
+import { parse, correctPlace, matchMarkers } from '../commands.js';
 
 // Mix of README commands and natural phrasings. [spoken text, expected intent, expected tag/slot]
 const PROMPTS = [
@@ -58,18 +57,20 @@ const audioCtx = new AudioContext({ sampleRate: 16000 }); // same as app.js
 
 $('env').textContent = `Browser: ${navigator.userAgent.match(/(Edg|Chrome|Firefox|Safari)\/[\d.]+/g)?.join(' ') || navigator.userAgent} · CPU threads: ${navigator.hardwareConcurrency} · RAM hint: ${navigator.deviceMemory ?? '?'} GB`;
 
-// 1. Model load time (cold on the first visit, warm after that from the browser cache)
+// 1. Model load time incl. warm-up (cold on the first visit, warm after that from the browser cache)
 const t0 = performance.now();
-transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en');
+const loaded = await loadTranscriber('wasm', msg => $('status').textContent = msg);
+transcriber = loaded.transcriber;
 const loadMs = performance.now() - t0;
+const deviceLabel = `${loaded.device} · ${JSON.stringify(loaded.dtype)}`;
 const res = performance.getEntriesByType('resource').filter(r => /huggingface|hf\.co|xethub|onnx|jsdelivr/.test(r.name));
 const bytes = res.reduce((a, r) => a + (r.encodedBodySize || 0), 0);
 const onnx = res.filter(r => r.name.includes('.onnx')).map(r => `${r.name.split('/').pop().split('?')[0]}: ${(r.encodedBodySize/1e6).toFixed(1)} MB`);
 
-// 2. Warm-up inference on 1 s of silence, so the first real prompt isn't penalised by WASM/JIT start-up
+// 2. Second short inference, after the loader's own warm-up, shows the steady-state cost
 const w0 = performance.now(); await transcriber(new Float32Array(16000)); const warmMs = performance.now() - w0;
 
-$('status').textContent = `Model ready in ${(loadMs/1000).toFixed(1)} s (${loadMs > 5000 ? 'probably cold, first download' : 'probably warm, from cache'}). Warm-up inference ${warmMs.toFixed(0)} ms.`;
+$('status').textContent = `Model ready on ${deviceLabel} in ${(loadMs/1000).toFixed(1)} s (download + warm-up). 1 s silence inference now takes ${warmMs.toFixed(0)} ms.`;
 showPrompt();
 
 function showPrompt() {
@@ -106,11 +107,13 @@ async function process(stream) {
   const heard = out.text.trim();
   const p = parse(heard);
   const got = p.intent === 'POI' ? p.tag : p.slot;
-  const clean = s => (s || '').toLowerCase().replace(/[.,!?]+$/, '').trim();
+  // Score exactly as the app acts: place names go through correctPlace, removals through matchMarkers
+  const onMap = [{ name: 'Jaipur, Rajasthan, India' }, { name: 'Hyderabad, Telangana, India' }];
   const slotOk = expVal === undefined ? true
     : p.intent === 'POI' ? p.tag === expVal
-    : p.intent === 'REMOVE_MARKER' ? p.slot === expVal   // app does a raw substring match here
-    : clean(p.slot) === expVal;                          // geocoder tolerates punctuation
+    : p.intent === 'LAYER' ? p.slot === expVal
+    : p.intent === 'REMOVE_MARKER' ? matchMarkers(p.slot, onMap).some(m => m.name.toLowerCase().startsWith(expVal))
+    : correctPlace(p.slot) === expVal;
   results.push({
     n: idx + 1, expected: text, heard, audioSec: +buf.duration.toFixed(2),
     decodeMs: Math.round(tInfer - tDecode), inferMs: Math.round(tDone - tInfer),
@@ -121,7 +124,7 @@ async function process(stream) {
   render(); idx++; showPrompt();
 }
 
-function norm(s) { return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean); }
+function norm(s) { return s.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean); }
 function wer(ref, hyp) {
   const r = norm(ref), h = norm(hyp);
   const d = Array.from({ length: r.length + 1 }, (_, i) => [i, ...Array(h.length).fill(0)]);
@@ -142,6 +145,7 @@ function render() {
   const rtf = results.reduce((a, x) => a + x.inferMs / 1000, 0) / results.reduce((a, x) => a + x.audioSec, 0);
   $('summary').textContent =
 `Utterances: ${results.length}
+Device: ${deviceLabel}
 Model load: ${(loadMs/1000).toFixed(1)} s · downloaded/cached bytes seen: ${(bytes/1e6).toFixed(1)} MB${bytes ? '' : ' (browser hid sizes; see the DevTools Network tab)'}
 ${onnx.join('\n')}
 
@@ -162,7 +166,7 @@ function download(name, text, type) { const a = document.createElement('a'); a.h
 $('rec').onclick = toggle;
 $('skip').onclick = () => { idx++; showPrompt(); };
 document.addEventListener('keydown', e => { if (e.code === 'Space' && !$('rec').disabled) { e.preventDefault(); toggle(); } });
-$('json').onclick = () => download('speech-bench.json', JSON.stringify({ env: $('env').textContent, loadMs, warmMs, bytes, results }, null, 2), 'application/json');
+$('json').onclick = () => download('speech-bench.json', JSON.stringify({ env: $('env').textContent, device: deviceLabel, loadMs, warmMs, bytes, results }, null, 2), 'application/json');
 $('csv').onclick = () => {
   const cols = ['n','expected','heard','audioSec','decodeMs','inferMs','sttMs','werEdits','words','intentOk','fullOk','gotIntent','gotValue'];
   const lines = results.map(r => [r.n, r.expected, r.heard, r.audioSec, r.decodeMs, r.inferMs, r.sttMs, r.wer.edits, r.wer.words, r.intentOk, r.fullOk, r.gotIntent, r.gotValue]

@@ -4,7 +4,7 @@ Ways to measure the project's real metrics instead of estimating them.
 
 | Metric | How to measure | File |
 |---|---|---|
-| Intent accuracy (text) | `node benchmarks/intent-test.mjs` runs 63 labelled commands through a copy of the app's parser | `intent-test.mjs`, `parser.mjs` |
+| Intent accuracy (text) | `node benchmarks/intent-test.mjs` runs 117 labelled commands through the app's own parser (`commands.js`) | `intent-test.mjs` |
 | Speech latency, WER, end-to-end intent accuracy | Serve the repo locally, open `benchmarks/bench.html` in Chrome/Edge, read the 24 prompts aloud | `bench.html` |
 | Model download size | Shown in `bench.html`, or DevTools → Network → filter `.onnx` on a cold load | – |
 | OSM tag count | Printed at the end of `intent-test.mjs` | – |
@@ -22,4 +22,4 @@ python -m http.server 8000      # or: npx serve, or VS Code Live Server
 - For stable latency, close heavy tabs, plug in the laptop, and run all 24 prompts. Report the **median** and **p90**, plus your CPU and browser.
 - Click *Download CSV* to keep the raw results.
 
-`parser.mjs` is a side-effect-free copy of `processVoiceCommand()` in `app.js`. If you change the parser in the app, update this copy too.
+The benchmark page loads Whisper with the same `speech.js` the app uses. By default it measures the CPU path (the original setup). Add `?device=webgpu` to the URL to measure the experimental GPU path.

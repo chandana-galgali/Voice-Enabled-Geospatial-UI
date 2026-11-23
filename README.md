@@ -29,7 +29,7 @@ A highly responsive, voice-controlled geospatial web explorer that allows users 
 
 ## ✨ Core Features
 
-*   **🎙️ Offline Machine Learning Voice Engine:** Powered by an edge-optimized **Whisper AI model** (`Xenova/whisper-base.en`) via Transformers.js. The entire speech-to-text pipeline runs locally inside the browser, ensuring high accuracy and zero cloud API costs.
+*   **🎙️ Offline Machine Learning Voice Engine:** Powered by a quantised **Whisper AI model** (`Xenova/whisper-base.en`) via Transformers.js v3. Speech-to-text runs on the user's device: on the CPU via WebAssembly, with an experimental WebGPU (GPU) mode via `?device=webgpu`. No audio is sent to a cloud speech API.
 *   **🌍 Real-Time POI Discovery:** Fetches live geospatial data (Hospitals, Cafes, ATMs, Parks, etc.) directly from the **OpenStreetMap (OSM) Overpass API** within a targeted radius.
 *   **📍 Smart Marker Management:** 
     *   Add pins via voice commands.
@@ -64,7 +64,8 @@ Click the **Listen** button and try any of the following conversational commands
 *   **Geospatial Data APIs:** 
     *   *Nominatim API:* Dynamic forward and reverse geocoding.
     *   *Overpass API:* Real-time OSM node/way/relation extraction.
-*   **Voice Processing:** Hugging Face Transformers.js (Quantized Whisper-base English Model)
+*   **Voice Processing:** Hugging Face Transformers.js v3 (Quantized Whisper-base English Model; experimental WebGPU mode)
+*   **Command Parsing:** Rule-based intent parser with fuzzy correction of misheard Indian place names (`commands.js`)
 *   **Data Export:** `jsPDF` and `jsPDF-AutoTable`
 
 ---
@@ -84,6 +85,12 @@ Since this is a client-side web application, no complex backend server setup is 
 3. **Run the application:**
     Simply open `index.html` in any modern web browser.  
     *(For the best development experience, use the "Live Server" extension in VS Code).*
+
+---
+
+## 📊 Benchmarks
+
+See [`benchmarks/`](./benchmarks): `node benchmarks/intent-test.mjs` scores the command parser, and `benchmarks/bench.html` measures real speech latency, word error rate and end-to-end intent accuracy on your own voice.
 
 ---
 

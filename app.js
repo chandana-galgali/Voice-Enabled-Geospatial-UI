@@ -1,4 +1,5 @@
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0';
+import { loadTranscriber } from './speech.js';
+import { parse, correctPlace, matchMarkers } from './commands.js';
 
 // ==========================================
 // 1. MAP INITIALIZATION & MANUAL LAYER CONTROLS
@@ -76,7 +77,7 @@ elements.ttsToggle.addEventListener('click', () => {
 function handleInput(text) {
   if (text.trim()) {
     elements.transcript.innerText = `"${text}"`;
-    processVoiceCommand(text.toLowerCase().trim());
+    processVoiceCommand(text);
     elements.cmdInput.value = '';
   }
 }
@@ -95,10 +96,8 @@ function speak(text) {
 }
 
 // ==========================================
-// 3. OFFLINE WHISPER AI
+// 3. ON-DEVICE WHISPER AI (WebGPU, with CPU fallback)
 // ==========================================
-env.allowLocalModels = false; 
-
 let transcriber = null;
 let isRecording = false;
 let mediaRecorder = null;
@@ -106,13 +105,14 @@ let audioChunks = [];
 let audioContext;
 
 async function loadWhisperModel() {
-  updateStatus('Loading Offline AI...', '#f59e0b');
+  updateStatus('Loading AI...', '#f59e0b');
   elements.micBtn.disabled = true;
   elements.btnText.innerText = 'Loading AI...';
-  
+
   try {
-    transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en');
-    updateStatus('AI Ready (Offline)', '#10b981');
+    const loaded = await loadTranscriber('wasm', msg => updateStatus(msg, '#f59e0b'));
+    transcriber = loaded.transcriber;
+    updateStatus(`AI Ready (${loaded.device === 'webgpu' ? 'GPU' : 'CPU'}, on-device)`, '#10b981');
     elements.micBtn.disabled = false;
     elements.btnText.innerText = 'Listen';
   } catch (error) {
@@ -176,13 +176,14 @@ async function processAudioData() {
 
   try {
     const output = await transcriber(audioData);
-    const transcript = output.text.trim();
-    
+    // Whisper emits tags like "[BLANK_AUDIO]" or "(music)" for silence/noise: treat those as no speech
+    const transcript = output.text.replace(/\[[^\]]*\]|\([^)]*\)/g, '').trim();
+
     elements.btnText.innerText = 'Listen';
 
     if (transcript) {
       elements.transcript.innerText = `"${transcript}"`;
-      processVoiceCommand(transcript.toLowerCase());
+      processVoiceCommand(transcript);
     } else {
       updateStatus('No speech detected', '#f43f5e');
       speak('I did not catch that.');
@@ -200,7 +201,8 @@ async function processAudioData() {
 async function geocode(placeName) {
   updateStatus('Searching...');
   try {
-    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(placeName)}&limit=1`);
+    // viewbox (without bounded=1) prefers results inside India but still finds places elsewhere
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(placeName)}&limit=1&viewbox=68.1,37.1,97.4,6.5`);
     const data = await res.json();
     if (data.length > 0) return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), name: data[0].display_name };
     throw new Error('Not found');
@@ -365,146 +367,86 @@ function exportPDF() {
 }
 
 // ==========================================
-// 6. EXPANDED COMMAND ENGINE
+// 6. COMMAND ENGINE (parsing lives in commands.js)
 // ==========================================
-const poiDictionary = {
-  'coffee': { type: 'amenity', tag: 'cafe', emoji: '☕' },
-  'cafe': { type: 'amenity', tag: 'cafe', emoji: '☕' },
-  'restaurant': { type: 'amenity', tag: 'restaurant', emoji: '🍽️' },
-  'food': { type: 'amenity', tag: 'restaurant', emoji: '🍽️' },
-  'bakery': { type: 'shop', tag: 'bakery', emoji: '🥐' },
-  'hospital': { type: 'amenity', tag: 'hospital', emoji: '🏥' },
-  'medical': { type: 'amenity', tag: 'clinic', emoji: '🩺' },
-  'clinic': { type: 'amenity', tag: 'clinic', emoji: '🩺' },
-  'pharmac': { type: 'amenity', tag: 'pharmacy', emoji: '💊' }, 
-  'chemist': { type: 'amenity', tag: 'pharmacy', emoji: '💊' }, 
-  'police': { type: 'amenity', tag: 'police', emoji: '🚓' },
-  'cop': { type: 'amenity', tag: 'police', emoji: '🚓' },
-  'fire': { type: 'amenity', tag: 'fire_station', emoji: '🚒' },
-  'atm': { type: 'amenity', tag: 'atm', emoji: '🏧' },
-  'bank': { type: 'amenity', tag: 'bank', emoji: '🏦' },
-  'ev ': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
-  'charging': { type: 'amenity', tag: 'charging_station', emoji: '⚡' },
-  'bus': { type: 'highway', tag: 'bus_stop', emoji: '🚌' },
-  'airport': { type: 'aeroway', tag: 'aerodrome', emoji: '✈️' },
-  'flight': { type: 'aeroway', tag: 'aerodrome', emoji: '✈️' },
-  'park': { type: 'leisure', tag: 'park', emoji: '🌳' },
-  'garden': { type: 'leisure', tag: 'garden', emoji: '🌷' },
-  'amusement': { type: 'tourism', tag: 'theme_park', emoji: '🎢' },
-  'theme park': { type: 'tourism', tag: 'theme_park', emoji: '🎢' },
-  'hotel': { type: 'tourism', tag: 'hotel', emoji: '🏨' },
-  'mall': { type: 'shop', tag: 'mall', emoji: '🛍️' },
-  'center': { type: 'shop', tag: 'mall', emoji: '🛍️' },
-  'supermarket': { type: 'shop', tag: 'supermarket', emoji: '🛒' },
-  'grocery': { type: 'shop', tag: 'supermarket', emoji: '🛒' },
-  'store': { type: 'shop', tag: 'supermarket', emoji: '🛒' },
-  'pub': { type: 'amenity', tag: 'pub', emoji: '🍻' },
-  'bar': { type: 'amenity', tag: 'bar', emoji: '🍺' }
-};
+function setLayer(name, label) {
+  map.removeLayer(currentLayer); layers[name].addTo(map); currentLayer = layers[name];
+  updateStatus(label, '#10b981'); speak(`${label} on`);
+}
 
-async function processVoiceCommand(cmd) {
-  // 1. Remove specific marker 
-  const removeSpecific = cmd.match(/(?:remove|clear|delete|erase) (?:a )?marker (?:from|at|in) (.+)|unmark (.+)/);
-  if (removeSpecific) {
-    const target = (removeSpecific[1] || removeSpecific[2]).trim();
-    const markersToKill = activeMarkers.filter(m => m.name.toLowerCase().includes(target));
-    
-    if (markersToKill.length > 0) {
-      markersToKill.forEach(m => removeMarker(m.id));
-      updateStatus(`Removed ${target}`, '#10b981');
-      speak(`Removed marker from ${target}`);
-    } else {
-      updateStatus(`Not found: ${target}`, '#f43f5e');
-      speak(`I couldn't find a marker for ${target}`);
-    }
-    return;
-  }
+async function processVoiceCommand(text) {
+  const r = parse(text);
+  // Repair near-miss Indian place names ("Puna" -> Pune, "Surad" -> Surat) before geocoding
+  const place = r.slot && ['POI', 'NAVIGATE', 'ADD_MARKER'].includes(r.intent) ? correctPlace(r.slot) : r.slot;
 
-  // 2. Clear All Markers
-  if (/(?:clear|remove|delete) (?:all )?marker(?:s)?/.test(cmd) || cmd.includes('clear map')) {
-    markersGroup.clearLayers();
-    activeMarkers = [];
-    updateDrawer();
-    updateStatus('Map Cleared', '#10b981');
-    speak('Cleared all markers');
-    return;
-  }
-
-  // 3. POI Discovery Engine
-  const poiMatch = cmd.match(/(?:find|show me|show|search for) (.+) (?:near|in|around|at) (.+)/);
-  if (poiMatch) {
-    const rawIntent = poiMatch[1].toLowerCase();
-    const location = poiMatch[2];
-    
-    let mappedCategory = null;
-    for (const key in poiDictionary) {
-      if (rawIntent.includes(key)) {
-        mappedCategory = poiDictionary[key];
-        break;
+  switch (r.intent) {
+    case 'REMOVE_MARKER': {
+      const markersToKill = matchMarkers(r.slot, activeMarkers);
+      if (markersToKill.length > 0) {
+        const label = markersToKill[0].name.split(',')[0];
+        markersToKill.forEach(m => removeMarker(m.id));
+        updateStatus(`Removed ${label}`, '#10b981');
+        speak(`Removed marker from ${label}`);
+      } else {
+        updateStatus(`Not found: ${r.slot}`, '#f43f5e');
+        speak(`I couldn't find a marker for ${r.slot}`);
       }
-    }
-
-    if (!mappedCategory) {
-      updateStatus(`Unsupported search`, '#f43f5e');
-      speak(`Sorry, I don't know how to search for ${rawIntent} yet.`);
       return;
     }
 
-    const locData = await geocode(location);
-    if (!locData) return;
-    
-    findPOIs(mappedCategory.type, mappedCategory.tag, locData.lat, locData.lon, mappedCategory.emoji);
-    return;
-  }
+    case 'CLEAR_ALL':
+      markersGroup.clearLayers();
+      activeMarkers = [];
+      updateDrawer();
+      updateStatus('Map Cleared', '#10b981');
+      speak('Cleared all markers');
+      return;
 
-  // 4. Add Custom Marker 
-  const addMatch = cmd.match(/(?:add|drop|put|place) (?:a )?marker (?:at|in|on) (.+)/) || cmd.match(/mark (.+)/);
-  if (addMatch) {
-    const place = addMatch[1].trim();
-    const loc = await geocode(place);
-    if (loc) {
-      map.flyTo([loc.lat, loc.lon], 12);
-      addCustomMarker(loc.lat, loc.lon, loc.name);
-      updateStatus(`Marked ${place}`, '#10b981');
-      speak(`Marker added at ${place}`);
+    case 'LAYER':
+      if (r.slot === 'satellite') return setLayer('satellite', 'Satellite View');
+      if (r.slot === 'terrain') return setLayer('terrain', 'Terrain View');
+      return setLayer('road', 'Road Map');
+
+    case 'ZOOM_IN': map.zoomIn(); updateStatus('Zoomed In', '#10b981'); speak('Zooming in'); return;
+    case 'ZOOM_OUT': map.zoomOut(); updateStatus('Zoomed Out', '#10b981'); speak('Zooming out'); return;
+
+    case 'POI': {
+      const locData = await geocode(place);
+      if (!locData) return;
+      findPOIs(r.type, r.tag, locData.lat, locData.lon, r.emoji);
+      return;
     }
-    return;
-  }
 
-  // 5. Map Layer Controls (MOVED UP to prevent triggering the geocoder!)
-  if (cmd.includes('satellite')) { 
-    map.removeLayer(currentLayer); layers.satellite.addTo(map); currentLayer = layers.satellite; 
-    updateStatus('Satellite View', '#10b981'); speak('Satellite view on'); return; 
-  }
-  if (cmd.includes('road')) { 
-    map.removeLayer(currentLayer); layers.road.addTo(map); currentLayer = layers.road; 
-    updateStatus('Road Map', '#10b981'); speak('Road map on'); return; 
-  }
-  if (cmd.includes('terrain')) { 
-    map.removeLayer(currentLayer); layers.terrain.addTo(map); currentLayer = layers.terrain; 
-    updateStatus('Terrain View', '#10b981'); speak('Terrain view on'); return; 
-  }
+    case 'UNSUPPORTED_POI':
+      updateStatus('Unsupported search', '#f43f5e');
+      speak(`Sorry, I don't know how to search for ${r.slot} yet.`);
+      return;
 
-  // 6. Standard Navigation (Show / Find / Go / Zoom)
-  const navMatch = cmd.match(/(?:zoom to|go to|navigate to|show me|show|find) (.+)/);
-  if (navMatch) {
-    const place = navMatch[1].trim();
-    const loc = await geocode(place);
-    if (loc) {
-      map.flyTo([loc.lat, loc.lon], 13);
-      updateStatus(`Navigating to ${place}`, '#10b981');
-      speak(`Navigating to ${place}`);
+    case 'ADD_MARKER': {
+      const loc = await geocode(place);
+      if (loc) {
+        map.flyTo([loc.lat, loc.lon], 12);
+        addCustomMarker(loc.lat, loc.lon, loc.name);
+        updateStatus(`Marked ${place}`, '#10b981');
+        speak(`Marker added at ${place}`);
+      }
+      return;
     }
-    return;
-  }
-  
-  // 7. Zoom Controls
-  if (cmd.includes('zoom in')) { map.zoomIn(); updateStatus('Zoomed In', '#10b981'); speak('Zooming in'); return; }
-  if (cmd.includes('zoom out')) { map.zoomOut(); updateStatus('Zoomed Out', '#10b981'); speak('Zooming out'); return; }
 
-  // 8. The Absolute Fallback
-  updateStatus('Command not recognized', '#f43f5e');
-  speak("I didn't understand that command. Please try again.");
+    case 'NAVIGATE': {
+      const loc = await geocode(place);
+      if (loc) {
+        map.flyTo([loc.lat, loc.lon], 13);
+        updateStatus(`Navigating to ${place}`, '#10b981');
+        speak(`Navigating to ${place}`);
+      }
+      return;
+    }
+
+    default:
+      updateStatus('Command not recognized', '#f43f5e');
+      speak("I didn't understand that command. Please try again.");
+  }
 }
 
 // ==========================================
