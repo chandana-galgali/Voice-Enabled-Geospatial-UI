@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voice Geospatial UI – Speech Benchmark</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; color: #0f172a; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; margin-top: 28px; }
+  .prompt { font-size: 26px; font-weight: 600; margin: 16px 0; padding: 16px; background: #f1f5f9; border-radius: 8px; }
+  button { font-size: 15px; padding: 8px 16px; margin-right: 8px; border-radius: 6px; border: 1px solid #94a3b8; background: #fff; cursor: pointer; }
+  button.rec { background: #ef4444; color: #fff; border-color: #ef4444; }
+  button:disabled { opacity: .5; cursor: default; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  td, th { border-bottom: 1px solid #e2e8f0; padding: 4px 6px; text-align: left; }
+  .ok { color: #15803d; } .bad { color: #b91c1c; }
+  #status { color: #475569; } pre { background: #f8fafc; padding: 12px; border-radius: 6px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Speech benchmark: Whisper (Xenova/whisper-base.en) + command parser</h1>
+<p>This page uses the same Transformers.js version, model and audio path as <code>app.js</code>. Read each prompt aloud naturally, then press Stop (or the space bar). It measures real latency and real end-to-end accuracy on your voice and machine.</p>
+<p id="status">Loading model…</p>
+<p id="env"></p>
+
+<div class="prompt" id="prompt">–</div>
+<button id="rec" disabled>🎙️ Record</button>
+<button id="skip" disabled>Skip</button>
+<span id="progress"></span>
+
+<h2>Results</h2>
+<pre id="summary">No results yet.</pre>
+<button id="csv" disabled>Download CSV</button>
+<button id="json" disabled>Download JSON</button>
+<table><thead><tr><th>#</th><th>Expected</th><th>Whisper heard</th><th>Audio s</th><th>STT ms</th><th>Intent</th></tr></thead><tbody id="rows"></tbody></table>
+
+<script type="module">
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0';
+import { parse } from './parser.mjs';
+env.allowLocalModels = false;
+
+// Mix of README commands and natural phrasings. [spoken text, expected intent, expected tag/slot]
+const PROMPTS = [
+  ['Go to Delhi','NAVIGATE','delhi'], ['Find cafes near Pune','POI','cafe'], ['Show satellite view','LAYER','satellite'],
+  ['Zoom in','ZOOM_IN'], ['Mark Jaipur','ADD_MARKER','jaipur'], ['Show hospitals in Chennai','POI','hospital'],
+  ['Unmark Jaipur','REMOVE_MARKER','jaipur'], ['Search for ATMs around Surat','POI','atm'], ['Show terrain view','LAYER','terrain'],
+  ['Zoom out','ZOOM_OUT'], ['Find bus stops in Bengaluru','POI','bus_stop'], ['Drop a marker at Hyderabad','ADD_MARKER','hyderabad'],
+  ['Show me pharmacies near Thane','POI','pharmacy'], ['Navigate to Kolkata','NAVIGATE','kolkata'], ['Clear map','CLEAR_ALL'],
+  ['Find police stations near Andheri','POI','police'], ['Show road view','LAYER','road'], ['Find hotels in Goa','POI','hotel'],
+  ['Show parks in Mumbai','POI','park'], ['Remove marker from Hyderabad','REMOVE_MARKER','hyderabad'],
+  ['Find restaurants near Bandra','POI','restaurant'], ['Zoom to Mumbai','NAVIGATE','mumbai'],
+  ['Find EV charging stations in Noida','POI','charging_station'], ['Clear all markers','CLEAR_ALL'],
+];
+
+const $ = id => document.getElementById(id);
+const results = [];
+let transcriber, idx = 0, recorder, chunks = [], recording = false, tStop = 0;
+const audioCtx = new AudioContext({ sampleRate: 16000 }); // same as app.js
+
+$('env').textContent = `Browser: ${navigator.userAgent.match(/(Edg|Chrome|Firefox|Safari)\/[\d.]+/g)?.join(' ') || navigator.userAgent} · CPU threads: ${navigator.hardwareConcurrency} · RAM hint: ${navigator.deviceMemory ?? '?'} GB`;
+
+// 1. Model load time (cold on the first visit, warm after that from the browser cache)
+const t0 = performance.now();
+transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en');
+const loadMs = performance.now() - t0;
+const res = performance.getEntriesByType('resource').filter(r => /huggingface|hf\.co|xethub|onnx|jsdelivr/.test(r.name));
+const bytes = res.reduce((a, r) => a + (r.encodedBodySize || 0), 0);
+const onnx = res.filter(r => r.name.includes('.onnx')).map(r => `${r.name.split('/').pop().split('?')[0]}: ${(r.encodedBodySize/1e6).toFixed(1)} MB`);
+
+// 2. Warm-up inference on 1 s of silence, so the first real prompt isn't penalised by WASM/JIT start-up
+const w0 = performance.now(); await transcriber(new Float32Array(16000)); const warmMs = performance.now() - w0;
+
+$('status').textContent = `Model ready in ${(loadMs/1000).toFixed(1)} s (${loadMs > 5000 ? 'probably cold, first download' : 'probably warm, from cache'}). Warm-up inference ${warmMs.toFixed(0)} ms.`;
+showPrompt();
+
+function showPrompt() {
+  if (idx >= PROMPTS.length) { $('prompt').textContent = 'Done ✔'; $('rec').disabled = $('skip').disabled = true; return; }
+  $('prompt').textContent = PROMPTS[idx][0];
+  $('progress').textContent = `${idx + 1} / ${PROMPTS.length}`;
+  $('rec').disabled = $('skip').disabled = false;
+}
+
+async function toggle() {
+  if (!recording) {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression: true, echoCancellation: true } });
+    recorder = new MediaRecorder(stream); chunks = [];
+    recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
+    recorder.onstop = () => process(stream);
+    recorder.start(); recording = true;
+    $('rec').textContent = '⏹ Stop'; $('rec').classList.add('rec');
+  } else {
+    tStop = performance.now(); recorder.stop(); recording = false;
+    $('rec').textContent = '🎙️ Record'; $('rec').classList.remove('rec'); $('rec').disabled = true;
+  }
+}
+
+async function process(stream) {
+  stream.getTracks().forEach(t => t.stop());
+  const [text, expIntent, expVal] = PROMPTS[idx];
+  // Same path as app.js: webm blob -> decodeAudioData at 16 kHz -> channel 0 -> Whisper
+  const tDecode = performance.now();
+  const buf = await audioCtx.decodeAudioData(await new Blob(chunks, { type: 'audio/webm' }).arrayBuffer());
+  const pcm = buf.getChannelData(0);
+  const tInfer = performance.now();
+  const out = await transcriber(pcm);
+  const tDone = performance.now();
+  const heard = out.text.trim();
+  const p = parse(heard);
+  const got = p.intent === 'POI' ? p.tag : p.slot;
+  const clean = s => (s || '').toLowerCase().replace(/[.,!?]+$/, '').trim();
+  const slotOk = expVal === undefined ? true
+    : p.intent === 'POI' ? p.tag === expVal
+    : p.intent === 'REMOVE_MARKER' ? p.slot === expVal   // app does a raw substring match here
+    : clean(p.slot) === expVal;                          // geocoder tolerates punctuation
+  results.push({
+    n: idx + 1, expected: text, heard, audioSec: +buf.duration.toFixed(2),
+    decodeMs: Math.round(tInfer - tDecode), inferMs: Math.round(tDone - tInfer),
+    sttMs: Math.round(tDone - tStop),               // stop pressed -> transcript ready (what the user feels)
+    wer: wer(text, heard), intentOk: p.intent === expIntent, fullOk: p.intent === expIntent && slotOk,
+    gotIntent: p.intent, gotValue: got ?? ''
+  });
+  render(); idx++; showPrompt();
+}
+
+function norm(s) { return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean); }
+function wer(ref, hyp) {
+  const r = norm(ref), h = norm(hyp);
+  const d = Array.from({ length: r.length + 1 }, (_, i) => [i, ...Array(h.length).fill(0)]);
+  for (let j = 1; j <= h.length; j++) d[0][j] = j;
+  for (let i = 1; i <= r.length; i++) for (let j = 1; j <= h.length; j++)
+    d[i][j] = Math.min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + (r[i-1] === h[j-1] ? 0 : 1));
+  return { edits: d[r.length][h.length], words: r.length };
+}
+const pct = (a, b) => b ? (100 * a / b).toFixed(1) + '%' : '–';
+function q(arr, p) { const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; }
+
+function render() {
+  const r = results.at(-1);
+  $('rows').insertAdjacentHTML('beforeend', `<tr><td>${r.n}</td><td>${r.expected}</td><td>${r.heard}</td><td>${r.audioSec}</td><td>${r.sttMs}</td>
+    <td class="${r.fullOk ? 'ok' : 'bad'}">${r.fullOk ? '✔' : '✘'} ${r.gotIntent} ${r.gotValue}</td></tr>`);
+  const stt = results.map(x => x.sttMs), inf = results.map(x => x.inferMs);
+  const E = results.reduce((a, x) => a + x.wer.edits, 0), W = results.reduce((a, x) => a + x.wer.words, 0);
+  const rtf = results.reduce((a, x) => a + x.inferMs / 1000, 0) / results.reduce((a, x) => a + x.audioSec, 0);
+  $('summary').textContent =
+`Utterances: ${results.length}
+Model load: ${(loadMs/1000).toFixed(1)} s · downloaded/cached bytes seen: ${(bytes/1e6).toFixed(1)} MB${bytes ? '' : ' (browser hid sizes; see the DevTools Network tab)'}
+${onnx.join('\n')}
+
+LATENCY (stop pressed -> transcript ready)
+  median ${q(stt, .5)} ms · p90 ${q(stt, .9)} ms · min ${Math.min(...stt)} ms · max ${Math.max(...stt)} ms
+  Whisper inference only: median ${q(inf, .5)} ms · real-time factor ${rtf.toFixed(2)} (below 1 = faster than real time)
+
+ACCURACY
+  Word error rate:              ${pct(E, W)}  (${E} edits / ${W} words)
+  Exact transcript (normalised): ${pct(results.filter(x => x.wer.edits === 0).length, results.length)}
+  Intent accuracy (end-to-end):  ${pct(results.filter(x => x.intentOk).length, results.length)}
+  Intent + slot accuracy:        ${pct(results.filter(x => x.fullOk).length, results.length)}
+`;
+  $('csv').disabled = $('json').disabled = false;
+}
+
+function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); }
+$('rec').onclick = toggle;
+$('skip').onclick = () => { idx++; showPrompt(); };
+document.addEventListener('keydown', e => { if (e.code === 'Space' && !$('rec').disabled) { e.preventDefault(); toggle(); } });
+$('json').onclick = () => download('speech-bench.json', JSON.stringify({ env: $('env').textContent, loadMs, warmMs, bytes, results }, null, 2), 'application/json');
+$('csv').onclick = () => {
+  const cols = ['n','expected','heard','audioSec','decodeMs','inferMs','sttMs','werEdits','words','intentOk','fullOk','gotIntent','gotValue'];
+  const lines = results.map(r => [r.n, r.expected, r.heard, r.audioSec, r.decodeMs, r.inferMs, r.sttMs, r.wer.edits, r.wer.words, r.intentOk, r.fullOk, r.gotIntent, r.gotValue]
+    .map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+  download('speech-bench.csv', [cols.join(','), ...lines].join('\n'), 'text/csv');
+};
+</script>
+</body>
+</html>
