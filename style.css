@@ -3,7 +3,7 @@ body, html { height: 100%; font-family: 'Outfit', sans-serif; background: #0f172
 #map { width: 100vw; height: 100vh; z-index: 1; }
 
 .side-panel {
-  position: absolute; top: 20px; width: 320px;
+  position: absolute; top: 20px; width: 320px; max-height: calc(100vh - 40px); min-height: 0;
   background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px;
   color: white; z-index: 1000; display: flex; flex-direction: column;
@@ -12,7 +12,7 @@ body, html { height: 100%; font-family: 'Outfit', sans-serif; background: #0f172
 
 .left-panel { left: 20px; }
 .right-panel { right: 20px; }
-.panel-content { padding: 20px; display: flex; flex-direction: column; gap: 15px; }
+.panel-content { padding: 20px; display: flex; flex-direction: column; gap: 15px; min-height: 0; overflow-y: auto; }
 
 .collapse-btn {
   background: rgba(0, 0, 0, 0.2); border: none; color: white; font-size: 14px;
@@ -22,6 +22,12 @@ body, html { height: 100%; font-family: 'Outfit', sans-serif; background: #0f172
 }
 .collapse-btn:hover { background: rgba(255, 255, 255, 0.05); }
 .collapsed .collapsible-body { display: none; }
+
+/* Thin, subtle scrollbars inside the glass panels */
+.panel-content { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.2) transparent; }
+.panel-content::-webkit-scrollbar { width: 4px; }
+.panel-content::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 4px; }
+.panel-content::-webkit-scrollbar-track { background: transparent; }
 
 .panel-header {
   display: flex; align-items: center; gap: 12px; padding-bottom: 15px;
@@ -41,10 +47,33 @@ body, html { height: 100%; font-family: 'Outfit', sans-serif; background: #0f172
 }
 .mic-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(59, 130, 246, 0.4); }
 .mic-btn.listening { background: linear-gradient(135deg, #ef4444, #f43f5e); animation: pulse 1.5s infinite; }
+/* Live mic level: a bar along the bottom of the button while listening */
+.mic-btn { position: relative; overflow: hidden; --level: 0; }
+.mic-btn::after {
+  content: ''; position: absolute; left: 0; bottom: 0; height: 4px; width: calc(var(--level) * 100%);
+  background: rgba(255,255,255,0.85); transition: width 80ms linear;
+}
+.mic-btn:disabled { opacity: 0.6; cursor: wait; transform: none; box-shadow: none; }
+.mic-hint { font-size: 11px; color: #94a3b8; text-align: center; margin: 6px 0 0 0; }
+.mic-hint kbd {
+  font-family: inherit; font-size: 10px; padding: 1px 5px; border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.08); color: #e2e8f0;
+}
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
 
 .status-container { display: flex; justify-content: space-between; align-items: center; }
 #status-tag { font-weight: 600; font-size: 13px; color: #10b981; }
+#status-tag { flex: 1; min-width: 0; }
+.status-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.model-toggle {
+  font-family: 'Outfit', sans-serif; font-size: 11px; font-weight: 500; color: #e2e8f0; cursor: pointer;
+  padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.08);
+}
+.model-toggle:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
+.model-toggle:disabled { opacity: 0.5; cursor: wait; }
+.interpretation { font-style: normal; font-size: 12px; color: #34d399; margin: 6px 0 0 0; }
+.interpretation:empty { display: none; }
+.interpretation.bad { color: #fb7185; }
 #tts-toggle { background: transparent; border: none; cursor: pointer; font-size: 18px; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.3)); }
 
 .transcript-box {
@@ -140,14 +169,30 @@ body, html { height: 100%; font-family: 'Outfit', sans-serif; background: #0f172
     right: 4%;
   }
   
-  .left-panel { 
-    top: 10px; 
+  /* The two panels share the screen: voice panel on top, POI list above the pin button.
+     Each gets a height budget and scrolls inside it, so they never overlap. */
+  .left-panel {
+    top: 10px;
+    max-height: calc(54vh - 10px);
   }
-  
-  .right-panel { 
-    top: auto; 
-    bottom: 90px; /* Snaps to bottom on phones */
+  .left-panel .panel-content { overflow-y: auto; padding: 14px 16px; gap: 12px; }
+
+  .right-panel {
+    top: auto;
+    bottom: 84px; /* Snaps to bottom on phones, above the pin button */
+    max-height: calc(46vh - 96px);
   }
+  .right-panel .panel-content { overflow-y: auto; padding: 12px 16px; gap: 10px; min-height: 0; }
+  #right-panel h3 { font-size: 14px; padding-bottom: 6px; }
+  #marker-list { max-height: none; }
+  .empty-state { padding: 4px 0; }
+  .mic-hint kbd, .mic-hint .kbd-text { display: none; }
+  .export-btn { padding: 9px; }
+
+  .panel-header { padding-bottom: 10px; }
+  .mic-btn { padding: 12px; }
+  .sample-commands .cmd-chips { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+  .cmd-chip { white-space: nowrap; }
 
   .manual-marker-fab {
     bottom: 25px; /* Moves up slightly on phones */

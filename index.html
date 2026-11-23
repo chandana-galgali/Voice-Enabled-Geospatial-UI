@@ -34,17 +34,22 @@
         <div class="mic-container">
           <button id="mic-btn" class="mic-btn">
             <span class="icon">🎙️</span>
-            <span id="btn-text">Listen</span>
+            <span id="btn-text">Loading AI...</span>
           </button>
+          <p class="mic-hint"><span class="kbd-text">Click or press </span><kbd>Space</kbd><span class="kbd-text">. </span>Stops automatically when you pause.</p>
         </div>
 
         <div class="status-container">
           <span id="status-tag">Ready</span>
-          <button id="tts-toggle" title="Toggle Audio Feedback">🔊</button>
+          <span class="status-actions">
+            <button id="model-toggle" class="model-toggle" title="Switch speech model">🎯 Accurate</button>
+            <button id="tts-toggle" title="Toggle Audio Feedback">🔊</button>
+          </span>
         </div>
 
         <div class="transcript-box">
           <p id="transcript">"Your command will appear here"</p>
+          <p id="interpretation" class="interpretation"></p>
         </div>
 
         <div class="fallback-input">

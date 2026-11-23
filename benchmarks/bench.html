@@ -18,7 +18,7 @@
 </head>
 <body>
 <h1>Speech benchmark: Whisper (Xenova/whisper-base.en) + command parser</h1>
-<p>This page loads Whisper with the exact same code as the app (<code>speech.js</code>) and scores with the app's parser (<code>commands.js</code>). Add <code>?device=webgpu</code> to the URL to try the GPU path. Read each prompt aloud naturally, then press Stop (or the space bar). It measures real latency and real end-to-end accuracy on your voice and machine.</p>
+<p>This page loads Whisper with the exact same code as the app (<code>speech.js</code>) and scores with the app's parser (<code>commands.js</code>). Add <code>?model=tiny</code> to the URL to test the Fast model. Read each prompt aloud naturally, then press Stop (or the space bar). It measures real latency and real end-to-end accuracy on your voice and machine.</p>
 <p id="status">Loading model…</p>
 <p id="env"></p>
 
@@ -59,7 +59,7 @@ $('env').textContent = `Browser: ${navigator.userAgent.match(/(Edg|Chrome|Firefo
 
 // 1. Model load time incl. warm-up (cold on the first visit, warm after that from the browser cache)
 const t0 = performance.now();
-const loaded = await loadTranscriber('wasm', msg => $('status').textContent = msg);
+const loaded = await loadTranscriber('base', msg => $('status').textContent = msg);
 transcriber = loaded.transcriber;
 const loadMs = performance.now() - t0;
 const deviceLabel = `${loaded.device} · ${JSON.stringify(loaded.dtype)}`;

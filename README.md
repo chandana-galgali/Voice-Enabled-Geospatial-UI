@@ -29,14 +29,16 @@ A highly responsive, voice-controlled geospatial web explorer that allows users 
 
 ## ✨ Core Features
 
-*   **🎙️ Offline Machine Learning Voice Engine:** Powered by a quantised **Whisper AI model** (`Xenova/whisper-base.en`) via Transformers.js v3. Speech-to-text runs on the user's device: on the CPU via WebAssembly, with an experimental WebGPU (GPU) mode via `?device=webgpu`. No audio is sent to a cloud speech API.
-*   **🌍 Real-Time POI Discovery:** Fetches live geospatial data (Hospitals, Cafes, ATMs, Parks, etc.) directly from the **OpenStreetMap (OSM) Overpass API** within a targeted radius.
+*   **🎙️ On-Device Voice Engine:** A quantised **Whisper** model runs in the browser via Transformers.js, inside a **Web Worker** so the map stays responsive while it transcribes. No audio is sent to a cloud speech API. Two modes: **Accurate** (`whisper-base.en`, 77 MB, ~4.7 s per command) and **Fast** (`whisper-tiny.en`, 41 MB, ~2.8 s), measured on a 4 GB RAM laptop CPU.
+*   **🗣️ Hands-Free Recording:** Click or press <kbd>Space</kbd> and speak; recording stops automatically when you pause, with a live mic level meter.
+*   **🧠 Robust Command Understanding:** A rule-based intent parser (`commands.js`) that tolerates Whisper's mistakes: it repairs misheard command words ("atoms" → ATMs, "Sumin" → zoom in) and near-miss Indian place names ("Puna" → Pune), and shows what it understood (`→ Search hospital near Pune`). **91.7% intent accuracy** on spoken commands (see [results](./benchmarks/RESULTS.md)).
+*   **🌍 Real-Time POI Discovery:** Fetches live geospatial data (Hospitals, Cafes, ATMs, Parks, etc. across 21 OSM tags) directly from the **OpenStreetMap (OSM) Overpass API** within a 3 km radius, falling back across several public Overpass mirrors when one is overloaded.
 *   **📍 Smart Marker Management:** 
     *   Add pins via voice commands.
     *   Remove specific pins by naming them.
     *   Utilize the "Manual Pin Drop" crosshair UI with automatic reverse-geocoding.
 *   **🗺️ Dynamic Layer Controls:** Seamlessly switch between Satellite, Topographical (Terrain), and Street map views via voice commands or intuitive on-screen toggles.
-*   **📥 PDF Data Export:** Automatically generates formatted, tabular PDF reports (via jsPDF) of all active map markers, including precise coordinates and Google Maps routing links.
+*   **📥 PDF Data Export:** Automatically generates formatted, tabular PDF reports (via jsPDF) of all active map markers, including precise coordinates and Google Maps links.
 *   **📱 Fully Responsive Glassmorphic UI:** A premium, modern dashboard aesthetic that adapts flawlessly to desktop, tablet, and mobile devices without overlapping map controls.
 
 ---
@@ -64,8 +66,8 @@ Click the **Listen** button and try any of the following conversational commands
 *   **Geospatial Data APIs:** 
     *   *Nominatim API:* Dynamic forward and reverse geocoding.
     *   *Overpass API:* Real-time OSM node/way/relation extraction.
-*   **Voice Processing:** Hugging Face Transformers.js v3 (Quantized Whisper-base English Model; experimental WebGPU mode)
-*   **Command Parsing:** Rule-based intent parser with fuzzy correction of misheard Indian place names (`commands.js`)
+*   **Voice Processing:** Hugging Face Transformers.js running quantised Whisper (base.en / tiny.en) in a Web Worker (`speech.js`, `whisper-worker.js`)
+*   **Command Parsing:** Rule-based intent parser with fuzzy repair of misheard command words and Indian place names (`commands.js`)
 *   **Data Export:** `jsPDF` and `jsPDF-AutoTable`
 
 ---
@@ -90,14 +92,20 @@ Since this is a client-side web application, no complex backend server setup is 
 
 ## 📊 Benchmarks
 
-See [`benchmarks/`](./benchmarks): `node benchmarks/intent-test.mjs` scores the command parser, and `benchmarks/bench.html` measures real speech latency, word error rate and end-to-end intent accuracy on your own voice.
+| Metric | Result |
+|---|---|
+| Intent accuracy | **91.7%** |
+| Transcription time (median) | **4.7 s** (Accurate) · 2.8 s (Fast) |
+| Model download | 77 MB (Accurate) · 41 MB (Fast) |
+
+Measured on a 4 GB RAM laptop CPU. Details and how to reproduce: [`benchmarks/`](./benchmarks).
 
 ---
 
 ## ⚠️ Known Constraints & Architectural Trade-offs
 
 **Public API Rate Limiting & Timeouts**
-This application fetches real-time Point of Interest (POI) data using the open-source OSM Overpass API. Because we utilize a public, shared, rate-limited endpoint (`overpass-api.de`), users may occasionally encounter a **"Data too large to fetch"** or **Timeout** error in the UI. 
+This application fetches real-time Point of Interest (POI) data using the open-source OSM Overpass API. Because we utilize public, shared, rate-limited endpoints (`overpass-api.de` and its mirrors), users may occasionally encounter a **"Data too large to fetch"** or **Timeout** error in the UI. 
 
 *   **Why this happens:** To ensure maximum accuracy, our geospatial query searches for Nodes, Ways, and Relations (NWR) and calculates exact geometric centers for massive polygons (like hospitals or airports). In highly dense urban areas, if the global OSM server is under heavy load, it may fail to process these geometric calculations within the application's strict 10-second non-blocking timeout window.
 *   **The Workaround:** This is a server-side bandwidth limitation, not an application failure. Waiting a few moments and retrying the exact same voice command will often succeed once the server load drops.

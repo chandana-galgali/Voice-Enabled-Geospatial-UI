@@ -43,7 +43,9 @@ const elements = {
   leftCollapse: document.getElementById('left-collapse'),
   rightCollapse: document.getElementById('right-collapse'),
   leftPanel: document.getElementById('left-panel'),
-  rightPanel: document.getElementById('right-panel')
+  rightPanel: document.getElementById('right-panel'),
+  interpretation: document.getElementById('interpretation'),
+  modelToggle: document.getElementById('model-toggle')
 };
 
 elements.leftCollapse.addEventListener('click', () => {
@@ -96,43 +98,72 @@ function speak(text) {
 }
 
 // ==========================================
-// 3. ON-DEVICE WHISPER AI (WebGPU, with CPU fallback)
+// 3. ON-DEVICE WHISPER AI (Web Worker, CPU/WebAssembly)
 // ==========================================
-let transcriber = null;
+let speech = null;              // { transcriber, model, label, worker }
 let isRecording = false;
+let isBusy = false;             // true while a command is being transcribed
 let mediaRecorder = null;
 let audioChunks = [];
 let audioContext;
+let vad = null;                 // voice-activity detection state while recording
 
-async function loadWhisperModel() {
-  updateStatus('Loading AI...', '#f59e0b');
-  elements.micBtn.disabled = true;
-  elements.btnText.innerText = 'Loading AI...';
+const savedModel = (() => { try { return localStorage.getItem('whisperModel'); } catch { return null; } })();
+let currentModel = savedModel === 'tiny' ? 'tiny' : 'base';
 
-  try {
-    const loaded = await loadTranscriber('wasm', msg => updateStatus(msg, '#f59e0b'));
-    transcriber = loaded.transcriber;
-    updateStatus(`AI Ready (${loaded.device === 'webgpu' ? 'GPU' : 'CPU'}, on-device)`, '#10b981');
-    elements.micBtn.disabled = false;
-    elements.btnText.innerText = 'Listen';
-  } catch (error) {
-    console.error("Failed to load model:", error);
-    updateStatus('AI Load Failed', '#ef4444');
-  }
+function setMicReady(ready) {
+  elements.micBtn.disabled = !ready;
+  elements.btnText.innerText = ready ? 'Listen' : 'Loading AI...';
 }
+
+async function loadWhisperModel(model = currentModel) {
+  setMicReady(false);
+  elements.modelToggle.disabled = true;
+  speech?.worker.terminate();
+  speech = null;
+  try {
+    speech = await loadTranscriber(model, msg => updateStatus(msg, '#f59e0b'));
+    currentModel = speech.model;
+    updateStatus('AI Ready · on-device', '#10b981');
+    setMicReady(true);
+  } catch (error) {
+    console.error('Failed to load model:', error);
+    updateStatus('AI Load Failed (check your connection and reload)', '#ef4444');
+  }
+  elements.modelToggle.disabled = false;
+  elements.modelToggle.innerText = currentModel === 'tiny' ? '⚡ Fast' : '🎯 Accurate';
+  elements.modelToggle.title = currentModel === 'tiny'
+    ? 'Fast mode (Whisper tiny): quicker, less accurate. Click for Accurate mode.'
+    : 'Accurate mode (Whisper base). Click for Fast mode (Whisper tiny).';
+}
+
+elements.modelToggle.addEventListener('click', () => {
+  if (isRecording || isBusy) return;
+  const next = currentModel === 'tiny' ? 'base' : 'tiny';
+  try { localStorage.setItem('whisperModel', next); } catch {}
+  loadWhisperModel(next);
+});
 
 loadWhisperModel();
 
-elements.micBtn.addEventListener('click', async () => {
-  if (!transcriber) return;
+function toggleRecording() {
+  if (!speech || isBusy) return;
   if (!isRecording) startRecording();
   else stopRecording();
+}
+elements.micBtn.addEventListener('click', toggleRecording);
+
+// Space bar = push to talk (when not typing in the text box)
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || e.repeat || ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+  e.preventDefault();
+  toggleRecording();
 });
 
 async function startRecording() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ 
-      audio: { noiseSuppression: true, echoCancellation: true } 
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { noiseSuppression: true, echoCancellation: true }
     });
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     mediaRecorder = new MediaRecorder(stream);
@@ -141,45 +172,91 @@ async function startRecording() {
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) audioChunks.push(e.data);
     };
-
     mediaRecorder.onstop = processAudioData;
     mediaRecorder.start();
 
     isRecording = true;
     elements.micBtn.classList.add('listening');
     elements.btnText.innerText = 'Stop';
-    updateStatus('Recording...', '#f43f5e');
+    elements.interpretation.innerText = '';
+    updateStatus('Listening… (stops automatically when you pause)', '#f43f5e');
+    startVoiceDetection(stream);
 
   } catch (err) {
-    console.error("Microphone access denied:", err);
+    console.error('Microphone access denied:', err);
     updateStatus('Mic Access Denied', '#ef4444');
   }
 }
 
+// Live mic level + automatic stop: once speech has been heard, 1.2 s of silence ends the
+// recording; nothing heard for 6 s, or 10 s in total, also ends it.
+function startVoiceDetection(stream) {
+  // Separate context at the device's native rate: some browsers refuse to attach a mic stream
+  // to the 16 kHz context used for decoding.
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  source.connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+  const t0 = performance.now();
+  vad = { ctx, analyser, heardSpeech: false, lastLoud: t0, noiseFloor: 0.01, timer: null };
+
+  vad.timer = setInterval(() => {
+    analyser.getFloatTimeDomainData(buf);
+    const rms = Math.sqrt(buf.reduce((a, x) => a + x * x, 0) / buf.length);
+    const now = performance.now();
+    if (now - t0 < 300) vad.noiseFloor = Math.max(vad.noiseFloor, rms);   // calibrate on the first 300 ms
+    const threshold = Math.max(0.02, vad.noiseFloor * 2.5);
+    if (rms > threshold) { vad.heardSpeech = true; vad.lastLoud = now; }
+    elements.micBtn.style.setProperty('--level', Math.min(1, rms / 0.15).toFixed(2));
+
+    const silentFor = now - vad.lastLoud, elapsed = now - t0;
+    if ((vad.heardSpeech && silentFor > 1200) || (!vad.heardSpeech && elapsed > 6000) || elapsed > 10000) stopRecording();
+  }, 50);
+}
+
+function stopVoiceDetection() {
+  if (vad?.timer) clearInterval(vad.timer);
+  vad?.ctx.close().catch(() => {});
+  vad = null;
+  elements.micBtn.style.setProperty('--level', 0);
+}
+
 function stopRecording() {
+  if (!isRecording) return;
+  const heardSpeech = vad?.heardSpeech ?? true;
+  stopVoiceDetection();
+  isRecording = false;
+  elements.micBtn.classList.remove('listening');
+
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    if (!heardSpeech) mediaRecorder.onstop = null;     // nothing said: skip transcription
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(track => track.stop());
   }
-  
-  isRecording = false;
-  elements.micBtn.classList.remove('listening');
+
+  if (!heardSpeech) {
+    elements.btnText.innerText = 'Listen';
+    updateStatus('No speech heard. Try again', '#f43f5e');
+    return;
+  }
+  isBusy = true;
+  elements.micBtn.disabled = true;
   elements.btnText.innerText = 'Processing...';
-  updateStatus('Transcribing Locally...', '#f59e0b');
 }
 
 async function processAudioData() {
-  const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-  const arrayBuffer = await audioBlob.arrayBuffer();
-  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-  const audioData = audioBuffer.getChannelData(0);
-
+  const t0 = performance.now();
+  const tick = setInterval(() => updateStatus(`Transcribing on your device… ${((performance.now() - t0) / 1000).toFixed(0)} s`, '#f59e0b'), 500);
+  updateStatus('Transcribing on your device…', '#f59e0b');
   try {
-    const output = await transcriber(audioData);
+    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+    const audioBuffer = await audioContext.decodeAudioData(await audioBlob.arrayBuffer());
+    const output = await speech.transcriber(audioBuffer.getChannelData(0));
     // Whisper emits tags like "[BLANK_AUDIO]" or "(music)" for silence/noise: treat those as no speech
     const transcript = output.text.replace(/\[[^\]]*\]|\([^)]*\)/g, '').trim();
-
-    elements.btnText.innerText = 'Listen';
+    clearInterval(tick);
 
     if (transcript) {
       elements.transcript.innerText = `"${transcript}"`;
@@ -189,9 +266,12 @@ async function processAudioData() {
       speak('I did not catch that.');
     }
   } catch (err) {
-    console.error("Transcription error:", err);
+    clearInterval(tick);
+    console.error('Transcription error:', err);
     updateStatus('Transcription Error', '#ef4444');
-    elements.btnText.innerText = 'Listen';
+  } finally {
+    isBusy = false;
+    setMicReady(true);
   }
 }
 
@@ -213,6 +293,35 @@ async function geocode(placeName) {
   }
 }
 
+// Public Overpass servers are often overloaded, so try several mirrors in turn.
+const OVERPASS_SERVERS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter'
+];
+
+async function queryOverpass(query) {
+  let lastErr;
+  for (const [i, url] of OVERPASS_SERVERS.entries()) {
+    if (i > 0) updateStatus(`Map server busy, trying mirror ${i + 1}/${OVERPASS_SERVERS.length}...`, '#f59e0b');
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(query)}`,
+        signal: AbortSignal.timeout(12000)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+      return await res.json();
+    } catch (err) {
+      lastErr = err;
+      console.warn('Overpass mirror failed:', url, err.message);
+    }
+  }
+  throw lastErr;
+}
+
 async function findPOIs(queryType, tag, lat, lon, emoji) {
   updateStatus(`Scanning OSM database...`, '#f59e0b');
   
@@ -220,21 +329,7 @@ async function findPOIs(queryType, tag, lat, lon, emoji) {
   const query = `[out:json][timeout:10];nwr["${queryType}"="${tag}"](around:3000,${lat},${lon});out center 25;`;
   
   try {
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: `data=${encodeURIComponent(query)}`
-    });
-
-    if (!res.ok) {
-      if (res.status === 429) throw new Error('Rate Limited');
-      throw new Error(`API Error`);
-    }
-    
-    const data = await res.json();
+    const data = await queryOverpass(query);
     
     if (data.elements && data.elements.length > 0) {
       data.elements.forEach(el => {
@@ -252,8 +347,8 @@ async function findPOIs(queryType, tag, lat, lon, emoji) {
     }
   } catch (e) {
     console.error("OVERPASS ERROR:", e.message);
-    updateStatus('Not available in database', '#f59e0b');
-    speak('This data is currently unavailable or too large to fetch.');
+    updateStatus('Map data servers busy. Try again in a minute', '#f59e0b');
+    speak('The map data servers are busy right now. Please try again in a minute.');
   }
 }
 
@@ -374,10 +469,30 @@ function setLayer(name, label) {
   updateStatus(label, '#10b981'); speak(`${label} on`);
 }
 
+// Shows the user what the app understood, so a misheard command is obvious at a glance
+const title = s => (s || '').replace(/\b\w/g, c => c.toUpperCase());
+function showInterpretation(r, place) {
+  const fixed = place && r.slot && place !== r.slot ? ` (heard "${r.slot}")` : '';
+  const what = {
+    POI: () => `Search ${r.tag?.replace(/_/g, ' ')} near ${title(place)}${fixed}`,
+    NAVIGATE: () => `Go to ${title(place)}${fixed}`,
+    ADD_MARKER: () => `Add marker at ${title(place)}${fixed}`,
+    REMOVE_MARKER: () => `Remove marker: ${title(r.slot)}`,
+    CLEAR_ALL: () => 'Clear all markers',
+    LAYER: () => `Switch to ${r.slot} view`,
+    ZOOM_IN: () => 'Zoom in',
+    ZOOM_OUT: () => 'Zoom out',
+    UNSUPPORTED_POI: () => `Can't search for "${r.slot}" yet`,
+  }[r.intent];
+  elements.interpretation.innerText = what ? `→ ${what()}` : '→ Not understood. Try e.g. "Find hospitals in Pune"';
+  elements.interpretation.classList.toggle('bad', !what || r.intent === 'UNSUPPORTED_POI');
+}
+
 async function processVoiceCommand(text) {
   const r = parse(text);
   // Repair near-miss Indian place names ("Puna" -> Pune, "Surad" -> Surat) before geocoding
   const place = r.slot && ['POI', 'NAVIGATE', 'ADD_MARKER'].includes(r.intent) ? correctPlace(r.slot) : r.slot;
+  showInterpretation(r, place);
 
   switch (r.intent) {
     case 'REMOVE_MARKER': {

@@ -76,13 +76,60 @@ export function normalize(raw) {
 
 const cleanSlot = s => s.replace(/^(?:the|a)\s+/, '').trim();
 
+// ==========================================
+// TRANSCRIPT REPAIR: fix misheard COMMAND words (never the place name)
+// e.g. "search for atoms around surat" -> "search for atms ...", "remove maka from x" -> "remove marker from x",
+//      "sumin" -> "zoom in". Only words before the first connector ("near", "in", "from", ...) are touched,
+//      so place names are left for correctPlace() / the geocoder.
+// ==========================================
+const COMMAND_WORDS = [
+  'find', 'show', 'search', 'locate', 'look', 'list', 'navigate', 'take', 'fly', 'move', 'head', 'jump', 'where',
+  'mark', 'marker', 'markers', 'unmark', 'pin', 'pins', 'add', 'drop', 'put', 'place', 'set',
+  'remove', 'delete', 'clear', 'erase', 'reset', 'map',
+  'satellite', 'terrain', 'street', 'road', 'topo', 'topographic', 'view', 'mode', 'layer', 'switch', 'change', 'use', 'enable', 'turn', 'open',
+  'zoom', 'stations', 'station', 'stops', 'shops', 'shop', 'stores', 'nearest', 'please', 'okay'];
+const LOCATION_CONNECTORS = new Set(['near', 'nearby', 'in', 'around', 'at', 'and', 'from', 'on', 'to', 'into']);
+let VOCAB = null;
+function vocab() {
+  if (VOCAB) return VOCAB;
+  const words = new Set(COMMAND_WORDS);
+  for (const kw of Object.keys(poiDictionary)) for (const w of kw.split(' ')) forms(w).forEach(f => words.add(f));
+  return (VOCAB = [...words].filter(w => w.length >= 3));
+}
+
+export function repairTranscript(cmd) {
+  // Whole-command zoom variants Whisper produces: "sumin", "some out", "zoomin", "zoo in"
+  const z = cmd.match(/^(?:zoom|zum|zoo|zoon|soom|sum|some|summ)\s*-?\s*(in|out)$/);
+  if (z) return `zoom ${z[1]}`;
+
+  // Only command words are eligible: everything before the last location connector
+  // ("find case NEAR pune", "remove maka FROM x"), or just the first word if there is none ("mark x").
+  const words = cmd.split(' ');
+  let end = 1;
+  for (let i = words.length - 1; i > 0; i--) if (LOCATION_CONNECTORS.has(words[i])) { end = i; break; }
+  for (let i = 0; i < end; i++) {
+    const w = words[i];
+    if (w.length < 4 || LOCATION_CONNECTORS.has(w) || vocab().includes(w)) continue;
+    let best = null, bestD = Infinity, tie = false;
+    for (const v of vocab()) {
+      const dist = levenshtein(w, v) / Math.max(w.length, v.length);
+      if (dist < bestD) { best = v; bestD = dist; tie = false; } else if (dist === bestD && v !== best) tie = true;
+    }
+    if (best && !tie && bestD <= 0.34) words[i] = best;
+  }
+  return words.join(' ');
+}
+
 export function parse(raw) {
-  const cmd = normalize(raw);
+  const cmd = repairTranscript(normalize(raw));
   let m;
 
   // 1. Remove one marker ("unmarked" is a common Whisper mishearing of "unmark")
   if ((m = cmd.match(/^(?:remove|clear|delete|erase)\s+(?:the\s+|a\s+)?(?:marker|pin)s?\s+(?:from|at|in|on|for)\s+(.+)$|^unmark(?:ed)?\s+(.+)$/)))
     return { intent: 'REMOVE_MARKER', slot: cleanSlot(m[1] || m[2]) };
+  // "remove <misheard word> from X": in this app that can only mean removing a marker
+  if ((m = cmd.match(/^(?:remove|delete|erase)\s+(?:the\s+|a\s+)?\S+\s+from\s+(.+)$/)))
+    return { intent: 'REMOVE_MARKER', slot: cleanSlot(m[1]) };
 
   // 2. Clear everything
   if (/^(?:clear|remove|delete|erase)\s+(?:all\s+)?(?:the\s+)?(?:markers?|pins?)$/.test(cmd) || /\b(?:clear|reset)\s+(?:the\s+)?map\b/.test(cmd))

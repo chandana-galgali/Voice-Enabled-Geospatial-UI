@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voice Geospatial UI – Automated Speech Benchmark</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; color: #0f172a; }
+  h1 { font-size: 20px; } pre { background: #f8fafc; padding: 12px; border-radius: 6px; white-space: pre-wrap; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; } td, th { border-bottom: 1px solid #e2e8f0; padding: 3px 5px; text-align: left; }
+  .ok { color: #15803d; } .bad { color: #b91c1c; } button { font-size: 14px; padding: 6px 14px; }
+</style>
+</head>
+<body>
+<h1>Automated speech benchmark (no microphone needed)</h1>
+<p>Each command is spoken by a text-to-speech model (SpeechT5) in several voices, including an Indian-accented English voice, optionally with background noise.
+The audio then goes through the app's own Whisper loader (<code>speech.js</code>) and parser (<code>commands.js</code>), and is also scored with the original hackathon parser for comparison.
+Synthetic speech is cleaner than a real person talking, so treat these numbers as an upper bound.</p>
+<p>URL options: <code>?model=tiny</code> (fast model), <code>?set=heldout</code> (24 commands never used to tune the parser), <code>?voices=indian,us_female</code>, <code>?limit=5</code> (first N prompts, for a quick check).</p>
+<p id="status">Starting…</p>
+<pre id="summary">No results yet.</pre>
+<button id="json" disabled>Download JSON</button>
+<table><thead><tr><th>#</th><th>Voice</th><th>Said</th><th>Whisper heard</th><th>Infer ms</th><th>New parser</th><th>Original parser</th></tr></thead><tbody id="rows"></tbody></table>
+
+<script type="module">
+import { loadTranscriber } from '../speech.js';
+import { parse, correctPlace, matchMarkers } from '../commands.js';
+import { parse as parseOriginal } from './parser-original.mjs';
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0';
+
+const $ = id => document.getElementById(id);
+const status = t => { $('status').textContent = t; window.__status = t; };
+const params = new URLSearchParams(location.search);
+
+// Same 24 prompts as bench.html: [said, expected intent, expected tag/slot]
+let PROMPTS = [
+  ['Go to Delhi','NAVIGATE','delhi'], ['Find cafes near Pune','POI','cafe'], ['Show satellite view','LAYER','satellite'],
+  ['Zoom in','ZOOM_IN'], ['Mark Jaipur','ADD_MARKER','jaipur'], ['Show hospitals in Chennai','POI','hospital'],
+  ['Unmark Jaipur','REMOVE_MARKER','jaipur'], ['Search for ATMs around Surat','POI','atm'], ['Show terrain view','LAYER','terrain'],
+  ['Zoom out','ZOOM_OUT'], ['Find bus stops in Bengaluru','POI','bus_stop'], ['Drop a marker at Hyderabad','ADD_MARKER','hyderabad'],
+  ['Show me pharmacies near Thane','POI','pharmacy'], ['Navigate to Kolkata','NAVIGATE','kolkata'], ['Clear map','CLEAR_ALL'],
+  ['Find police stations near Andheri','POI','police'], ['Show road view','LAYER','road'], ['Find hotels in Goa','POI','hotel'],
+  ['Show parks in Mumbai','POI','park'], ['Remove marker from Hyderabad','REMOVE_MARKER','hyderabad'],
+  ['Find restaurants near Bandra','POI','restaurant'], ['Zoom to Mumbai','NAVIGATE','mumbai'],
+  ['Find EV charging stations in Noida','POI','charging_station'], ['Clear all markers','CLEAR_ALL'],
+];
+// Held-out set: written AFTER the parser fixes and never used to tune them (?set=heldout)
+const HELDOUT = [
+  ['Take me to Lucknow','NAVIGATE','lucknow'], ['Find ATMs near Powai','POI','atm'], ['Switch to satellite view','LAYER','satellite'],
+  ['Zoom in please','ZOOM_IN'], ['Put a marker on Nagpur','ADD_MARKER','nagpur'], ['Show me hotels in Udaipur','POI','hotel'],
+  ['Remove the marker from Nagpur','REMOVE_MARKER','nagpur'], ['Search for banks around Indiranagar','POI','bank'], ['Show the terrain map','LAYER','terrain'],
+  ['Find pharmacies in Kochi','POI','pharmacy'], ['Go to Chandigarh','NAVIGATE','chandigarh'], ['Find supermarkets near Whitefield','POI','supermarket'],
+  ['Show coffee shops in Kolkata','POI','cafe'], ['Navigate to Bhopal','NAVIGATE','bhopal'], ['Find the airport in Hyderabad','POI','aerodrome'],
+  ['Clear the map','CLEAR_ALL'], ['Find clinics near Dadar','POI','clinic'], ['Mark Amritsar','ADD_MARKER','amritsar'],
+  ['Find gardens in Mysore','POI','garden'], ['Zoom out a little','ZOOM_OUT'], ['Show me restaurants around Connaught Place','POI','restaurant'],
+  ['Find bus stops near Andheri','POI','bus_stop'], ['Show street view','LAYER','road'], ['Delete all markers','CLEAR_ALL'],
+];
+if (params.get('set') === 'heldout') PROMPTS = HELDOUT;
+if (params.get('limit')) PROMPTS = PROMPTS.slice(0, +params.get('limit'));
+
+// CMU ARCTIC x-vectors (SpeechT5 speaker embeddings). Several candidate files per speaker; first that exists wins.
+const XV = 'https://huggingface.co/datasets/Xenova/cmu-arctic-xvectors-extracted/resolve/main/';
+const VOICES = {
+  indian:       { label: 'Indian male (ksp)', spk: 'ksp', noise: false },
+  indian_noisy: { label: 'Indian male + noise (15 dB SNR)', spk: 'ksp', noise: true },
+  us_female:    { label: 'US female (slt)', spk: 'slt', noise: false },
+  scottish:     { label: 'Scottish male (awb)', spk: 'awb', noise: false },
+};
+const wantVoices = (params.get('voices') || 'indian,indian_noisy,us_female,scottish').split(',').filter(v => VOICES[v]);
+
+async function speakerUrl(spk) {
+  const ids = [];
+  for (const set of ['a', 'b']) for (let i = 1; i <= 12; i++) ids.push(`cmu_us_${spk}_arctic-wav-arctic_${set}${String(i).padStart(4, '0')}`);
+  for (const id of ids) {
+    const url = `${XV}${id}.bin`;
+    try { const r = await fetch(url, { method: 'HEAD' }); if (r.ok) return url; } catch {}
+  }
+  throw new Error(`No speaker embedding found for ${spk}`);
+}
+
+// Deterministic white noise at a given SNR, so runs are repeatable
+function addNoise(audio, snrDb, seed = 1) {
+  let s = seed; const rand = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
+  const p = audio.reduce((a, x) => a + x * x, 0) / audio.length;
+  const amp = Math.sqrt(p / Math.pow(10, snrDb / 10) * 3); // uniform noise variance = amp^2/3
+  return audio.map(x => x + amp * rand());
+}
+
+function norm(s) { return s.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean); }
+function wer(ref, hyp) {
+  const r = norm(ref), h = norm(hyp);
+  const d = Array.from({ length: r.length + 1 }, (_, i) => [i, ...Array(h.length).fill(0)]);
+  for (let j = 1; j <= h.length; j++) d[0][j] = j;
+  for (let i = 1; i <= r.length; i++) for (let j = 1; j <= h.length; j++)
+    d[i][j] = Math.min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + (r[i-1] === h[j-1] ? 0 : 1));
+  return { edits: d[r.length][h.length], words: r.length };
+}
+
+const ON_MAP = [{ name: 'Jaipur, Rajasthan, India' }, { name: 'Hyderabad, Telangana, India' }, { name: 'Nagpur, Maharashtra, India' }];
+function scoreNew(heard, ei, ev) {
+  const p = parse(heard);
+  if (p.intent !== ei) return { ok: false, intentOk: false, got: p };
+  const slotOk = ev === undefined ? true
+    : p.intent === 'POI' ? p.tag === ev
+    : p.intent === 'LAYER' ? p.slot === ev
+    : p.intent === 'REMOVE_MARKER' ? matchMarkers(p.slot, ON_MAP).some(m => m.name.toLowerCase().startsWith(ev))
+    : correctPlace(p.slot) === ev;
+  return { ok: slotOk, intentOk: true, got: p };
+}
+function scoreOriginal(heard, ei, ev) {
+  const p = parseOriginal(heard);
+  if (p.intent !== ei) return { ok: false, intentOk: false, got: p };
+  const clean = s => (s || '').replace(/[.,!?]+$/, '').trim();
+  const slotOk = ev === undefined ? true
+    : p.intent === 'POI' ? p.tag === ev
+    : p.intent === 'LAYER' ? p.slot === ev
+    : p.intent === 'REMOVE_MARKER' ? ON_MAP.some(m => m.name.toLowerCase().includes(p.slot) && m.name.toLowerCase().startsWith(ev)) // original: raw substring match
+    : clean(p.slot) === ev;                                                                                                          // geocoder tolerates "delhi."
+  return { ok: slotOk, intentOk: true, got: p };
+}
+
+const results = [];
+window.__results = results;
+const pct = (a, b) => b ? (100 * a / b).toFixed(1) + '%' : '–';
+const q = (arr, p) => { const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
+
+function summarise(meta) {
+  const byVoice = {};
+  for (const r of results) (byVoice[r.voice] ??= []).push(r);
+  const block = (rs, name) => {
+    const E = rs.reduce((a, x) => a + x.wer.edits, 0), W = rs.reduce((a, x) => a + x.wer.words, 0);
+    const inf = rs.map(x => x.inferMs);
+    return `${name} (n=${rs.length})
+  WER ${pct(E, W)} · exact transcripts ${pct(rs.filter(x => x.wer.edits === 0).length, rs.length)} · median inference ${q(inf, .5)} ms (p90 ${q(inf, .9)} ms)
+  New parser:      intent ${pct(rs.filter(x => x.newIntentOk).length, rs.length)} · intent+slot ${pct(rs.filter(x => x.newOk).length, rs.length)}
+  Original parser: intent ${pct(rs.filter(x => x.origIntentOk).length, rs.length)} · intent+slot ${pct(rs.filter(x => x.origOk).length, rs.length)}`;
+  };
+  const text = [`Device: ${meta.device} · model load + warm-up ${(meta.loadMs/1000).toFixed(1)} s · ${navigator.hardwareConcurrency} CPU threads · RAM hint ${navigator.deviceMemory ?? '?'} GB`, '',
+    ...Object.entries(byVoice).map(([v, rs]) => block(rs, VOICES[v].label)), '', block(results, 'ALL VOICES')].join('\n');
+  $('summary').textContent = text;
+  window.__summary = text;
+}
+
+status('Loading Whisper (same loader as the app)…');
+const t0 = performance.now();
+const loaded = await loadTranscriber('base', status);
+const meta = { set: params.get('set') || 'main', model: loaded.modelId, device: `${loaded.modelId} · ${loaded.device} ${loaded.dtype}`, loadMs: performance.now() - t0, userAgent: navigator.userAgent };
+window.__meta = meta;
+
+status('Loading text-to-speech model (SpeechT5)…');
+const tts = await pipeline('text-to-speech', 'Xenova/speecht5_tts', { quantized: false });
+
+// Phase 1: synthesise every utterance, then free the TTS model so it doesn't compete
+// with Whisper for RAM/CPU (keeps the inference timings clean on low-memory laptops).
+const jobs = [];
+const total = PROMPTS.length * wantVoices.length;
+for (const v of wantVoices) {
+  const voice = VOICES[v];
+  const spkUrl = await speakerUrl(voice.spk);
+  for (const [said, ei, ev] of PROMPTS) {
+    status(`Synthesising ${jobs.length + 1}/${total} (${voice.label}): "${said}"…`);
+    const out = await tts(said, { speaker_embeddings: spkUrl });
+    let audio = out.audio;
+    if (voice.noise) audio = addNoise(audio, 15, jobs.length + 1);
+    jobs.push({ v, said, ei, ev, audio, sr: out.sampling_rate });
+  }
+}
+try { await tts.dispose?.(); } catch {}
+
+// Phase 2: transcribe with Whisper and score
+let n = 0;
+const fmt = g => `${g.intent}${g.tag ? ' ' + g.tag : ''}${g.slot ? ' (' + g.slot + ')' : ''}`;
+for (const { v, said, ei, ev, audio, sr } of jobs) {
+  n++;
+  status(`Transcribing ${n}/${total} (${VOICES[v].label}): "${said}"…`);
+  const ti = performance.now();
+  const res = await loaded.transcriber(audio);
+  const inferMs = Math.round(res.inferMs ?? (performance.now() - ti));   // time inside the worker
+  const heard = res.text.replace(/\[[^\]]*\]|\([^)]*\)/g, '').trim();   // same clean-up as app.js
+  const nw = scoreNew(heard, ei, ev), og = scoreOriginal(heard, ei, ev);
+  const r = { n, voice: v, said, heard, audioSec: +(audio.length / sr).toFixed(2), inferMs, hidden: document.hidden, wer: wer(said, heard),
+              newOk: nw.ok, newIntentOk: nw.intentOk, newGot: nw.got, origOk: og.ok, origIntentOk: og.intentOk, origGot: og.got };
+  results.push(r);
+  $('rows').insertAdjacentHTML('beforeend', `<tr><td>${n}</td><td>${v}</td><td>${said}</td><td>${heard}</td><td>${inferMs}</td>
+    <td class="${r.newOk ? 'ok' : 'bad'}">${r.newOk ? '✔' : '✘'} ${fmt(nw.got)}</td><td class="${r.origOk ? 'ok' : 'bad'}">${r.origOk ? '✔' : '✘'} ${fmt(og.got)}</td></tr>`);
+  summarise(meta);
+}
+status(`Done: ${results.length} utterances.`);
+window.__done = true;
+$('json').disabled = false;
+$('json').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify({ meta, summary: window.__summary, results }, null, 2)], { type: 'application/json' }));
+  a.download = 'auto-bench-results.json'; a.click();
+};
+</script>
+</body>
+</html>

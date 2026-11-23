@@ -1,38 +1,60 @@
 // ==========================================
 // WHISPER LOADER
-// Default: the original, known-working setup (Transformers.js 2.16, CPU/WebAssembly, q8 model).
-// Opt-in:  ?device=webgpu tries the GPU via Transformers.js v3 and falls back to the default.
-// Shared by app.js and benchmarks/bench.html so both measure the same thing.
+// Whisper runs in a Web Worker (whisper-worker.js) on the CPU via WebAssembly, using the
+// quantised (q8) English-only models. Shared by app.js and the benchmark pages.
+//
+//   'base' (default): Xenova/whisper-base.en  - more accurate
+//   'tiny':           Xenova/whisper-tiny.en  - smaller download, faster, less accurate
+// Override from the URL with ?model=tiny or ?model=base.
 // ==========================================
-export const MODEL_ID = 'Xenova/whisper-base.en';
+export const MODELS = {
+  base: { id: 'Xenova/whisper-base.en', label: 'Accurate (Whisper base)' },
+  tiny: { id: 'Xenova/whisper-tiny.en', label: 'Fast (Whisper tiny)' },
+};
 
-async function loadCPU() {
-  const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0');
-  env.allowLocalModels = false;
-  return { transcriber: await pipeline('automatic-speech-recognition', MODEL_ID), device: 'wasm', dtype: 'q8' };
-}
+export async function loadTranscriber(preferred = 'base', onStatus = () => {}) {
+  const key = new URLSearchParams(location.search).get('model') || preferred;
+  const model = MODELS[key] ? key : 'base';
 
-async function loadGPU() {
-  if (!('gpu' in navigator) || !(await navigator.gpu.requestAdapter().catch(() => null))) throw new Error('WebGPU not available');
-  const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2');
-  env.allowLocalModels = false;
-  const dtype = { encoder_model: 'fp32', decoder_model_merged: 'q4' };
-  return { transcriber: await pipeline('automatic-speech-recognition', MODEL_ID, { device: 'webgpu', dtype }), device: 'webgpu', dtype };
-}
+  const worker = new Worker(new URL('./whisper-worker.js', import.meta.url), { type: 'module' });
+  let nextId = 0;
+  const pending = new Map();
+  const files = {};   // download progress per file
 
-// preferred: 'wasm' (default) | 'webgpu'. The URL (?device=webgpu / ?device=wasm) overrides it.
-export async function loadTranscriber(preferred = 'wasm', onStatus = () => {}) {
-  const want = new URLSearchParams(location.search).get('device') || preferred;
-  let loaded = null;
-  if (want === 'webgpu') {
-    try { onStatus('Loading AI (GPU)...'); loaded = await loadGPU(); }
-    catch (err) { console.warn('WebGPU Whisper failed, falling back to CPU', err); }
-  }
-  if (!loaded) { onStatus('Loading AI (CPU)...'); loaded = await loadCPU(); }
+  worker.onmessage = ({ data }) => {
+    if (data.type === 'progress') {
+      if (data.file && data.total) files[data.file] = { loaded: data.loaded ?? 0, total: data.total };
+      if (data.status === 'progress') {
+        const all = Object.values(files);
+        const loaded = all.reduce((a, f) => a + f.loaded, 0), total = all.reduce((a, f) => a + f.total, 0);
+        if (total > 1e6) onStatus(`Downloading AI model… ${Math.round(100 * loaded / total)}% of ${(total / 1e6).toFixed(0)} MB`);
+      }
+      return;
+    }
+    const p = pending.get(data.id);
+    if (!p) return;
+    pending.delete(data.id);
+    data.type === 'error' ? p.reject(new Error(data.error)) : p.resolve(data);
+  };
+  worker.onerror = e => { for (const p of pending.values()) p.reject(new Error(e.message || 'Worker error')); pending.clear(); };
 
-  // Warm-up on 1 s of silence: the first inference is very slow (WASM/shader compile),
-  // so pay that cost now instead of on the user's first command.
-  onStatus('Warming up AI (first run is slow)...');
-  await loaded.transcriber(new Float32Array(16000));
-  return loaded;
+  const call = (msg) => new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    worker.postMessage({ ...msg, id });
+  });
+
+  onStatus(`Loading AI (${MODELS[model].label})…`);
+  await call({ type: 'load', model: MODELS[model].id });
+
+  // Same call shape as a transformers.js pipeline: await transcriber(Float32Array) -> { text, inferMs }
+  const transcriber = (audio) => call({ type: 'transcribe', audio });
+
+  // Warm-up on 1 s of silence: the first inference compiles the WASM kernels and is very slow,
+  // so pay that cost during loading instead of on the user's first command.
+  onStatus('Warming up AI (first run is slow)…');
+  await transcriber(new Float32Array(16000));
+
+  const downloadedMB = Object.values(files).reduce((a, f) => a + f.total, 0) / 1e6;
+  return { transcriber, model, modelId: MODELS[model].id, label: MODELS[model].label, device: 'wasm', dtype: 'q8', downloadedMB, worker };
 }
